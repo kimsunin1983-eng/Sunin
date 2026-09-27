@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="영상 소리를 한국어 자막으로"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="영상의 언어"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/spinnerLang"
+            android:layout_width="match_parent"
+            android:layout_height="48dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="소리 가져오기"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/radioMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/radioSystem"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="폰 소리 직접 (이어폰 OK, Android 13 이상)" />
+
+            <RadioButton
+                android:id="@+id/radioMic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="마이크로 듣기 (스피커로 재생할 때)" />
+        </RadioGroup>
+
+        <CheckBox
+            android:id="@+id/checkOffline"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="오프라인 음성 인식 우선 사용" />
+
+        <Button
+            android:id="@+id/buttonStart"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="20dp"
+            android:text="자막 시작"
+            android:textSize="17sp" />
+
+        <TextView
+            android:id="@+id/textInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:lineSpacingExtra="4dp"
+            android:textSize="14sp" />
+    </LinearLayout>
+</ScrollView>
