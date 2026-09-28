@@ -45,7 +45,9 @@ import kotlin.concurrent.thread
 
 /**
  * [실시간 통역 모드] 소리 → Gemini Live 번역(원문 언어 자동 감지) → 자막
- *    연결이 안 되면 자동으로 아래 기본 모드로 전환
+ *    연결이 안 되면 → 듣기 번역 모드로 전환
+ * [듣기 번역 모드] 소리를 문장/6초 단위로 잘라 Gemini 가 직접 듣고 번역 → 자막
+ *    키 오류 등으로 안 되면 → 기본 모드로 전환
  * [기본 모드] 소리 → (폰 내장) 음성 인식 → 초벌 번역(Google, 실패 시 ML Kit) → Gemini 다듬기(키가 있을 때) → 자막
  *
  * MODE_SYSTEM: 다른 앱에서 재생되는 소리를 AudioPlaybackCapture 로 가져와
@@ -114,7 +116,9 @@ class CaptionService : Service() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         val key = prefs.getString("geminiKey", "").orEmpty().trim()
         geminiKey = key
-        val wantLive = key.isNotEmpty() && prefs.getBoolean("live", true)
+        val engine = prefs.getString("engine", "live")
+        val wantLive = key.isNotEmpty() && engine == "live"
+        val wantListen = key.isNotEmpty() && engine == "listen"
         if (key.isNotEmpty() && !langTag.startsWith("ko")) {
             refiner = GeminiRefiner(key, intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag)
         }
@@ -148,10 +152,10 @@ class CaptionService : Service() {
             }
         }
 
-        if (wantLive) {
-            // 실시간 통역은 소리를 직접 보내야 하므로 마이크 모드에서도 직접 녹음
+        if (wantLive || wantListen) {
+            // Gemini 방식은 소리를 직접 보내야 하므로 마이크 모드에서도 직접 녹음
             if (!useSystemAudio) startMicCapture()
-            startLive()
+            if (wantLive) startLive() else startListen()
         } else {
             startClassic()
         }
@@ -289,7 +293,12 @@ class CaptionService : Service() {
                     live.sendAudio(buf, n)
                     continue
                 }
-                if (!usingLive) {
+                val listen = audioTranslator
+                if (usingListen && listen != null) {
+                    listen.feed(buf, n)
+                    continue
+                }
+                if (!usingLive && !usingListen) {
                     val out = pipeOut
                     if (out == null) {
                         backlog = (backlog + buf.copyOf(n)).takeLast(backlogMax)
@@ -314,8 +323,11 @@ class CaptionService : Service() {
     private fun stopCapture() {
         captureActive = false
         usingLive = false
+        usingListen = false
         runCatching { liveClient?.close() }
         liveClient = null
+        runCatching { audioTranslator?.close() }
+        audioTranslator = null
         stopCapture()
         captureThread = null
     }
@@ -777,11 +789,52 @@ class CaptionService : Service() {
             .apply()
         Toast.makeText(
             this,
-            "Gemini 실시간 통역에 연결하지 못해 기본 방식으로 전환했어요.\n사유: ${error?.take(120)}",
+            "Gemini 실시간 통역에 연결하지 못해 '듣기 번역' 방식으로 전환했어요.\n사유: ${error?.take(120)}",
             Toast.LENGTH_LONG
         ).show()
-        if (!useSystemAudio) stopCapture() // 마이크는 음성 인식기가 직접 사용
-        startClassic()
+        startListen()
+    }
+
+    // ───────────────────────── Gemini 듣기 번역 ─────────────────────────
+    @Volatile private var audioTranslator: GeminiAudioTranslator? = null
+    @Volatile private var usingListen = false
+
+    private fun startListen() {
+        if (stopped) return
+        usingListen = true
+        if (!gotAnyResult) overlay?.setStatus("Gemini 듣기 번역 중 · 영상을 재생하세요 (2~4초 늦게 나와요)")
+        audioTranslator = GeminiAudioTranslator(geminiKey, object : GeminiAudioTranslator.Listener {
+            override fun onSubtitles(lines: List<Pair<String, String>>) = main.post {
+                if (!usingListen) return@post
+                gotAnyResult = true
+                lines.forEach { (src, ko) ->
+                    this@CaptionService.lines += Line(src).apply { refined = ko }
+                }
+                while (this@CaptionService.lines.size > 40) this@CaptionService.lines.removeAt(0)
+                render()
+            }.let { }
+
+            override fun onError(message: String, fatal: Boolean) = main.post {
+                if (!usingListen || stopped) return@post
+                if (!fatal) {
+                    if (!gotAnyResult) overlay?.setStatus(message)
+                    return@post
+                }
+                // 키 오류 등 → 기본 모드로
+                usingListen = false
+                audioTranslator?.close()
+                audioTranslator = null
+                getSharedPreferences("settings", MODE_PRIVATE).edit()
+                    .putString("lastLiveError", "[듣기 번역] $message").apply()
+                Toast.makeText(
+                    this@CaptionService,
+                    "Gemini 듣기 번역을 쓸 수 없어 기본 방식으로 전환했어요.\n$message",
+                    Toast.LENGTH_LONG
+                ).show()
+                if (!useSystemAudio) stopCapture() // 마이크는 음성 인식기가 직접 사용
+                startClassic()
+            }.let { }
+        })
     }
 
     private fun renderLive() {

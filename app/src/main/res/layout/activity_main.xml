@@ -85,13 +85,43 @@
             android:text="무료 키 받기: https://aistudio.google.com/apikey"
             android:textSize="13sp" />
 
-        <CheckBox
-            android:id="@+id/checkLive"
+        <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:checked="true"
-            android:text="Gemini 실시간 통역 사용 (실험 · 언어 자동 감지)" />
+            android:layout_marginTop="12dp"
+            android:text="번역 방식 (키가 있을 때)"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/radioEngine"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/engineLive"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Gemini 실시간 통역 (가장 빠름 · 실험)" />
+
+            <RadioButton
+                android:id="@+id/engineListen"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Gemini 듣기 번역 (정확 · 2~4초 늦음)" />
+
+            <RadioButton
+                android:id="@+id/engineBasic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="기본 (폰 음성 인식 + 번역 + Gemini 다듬기)" />
+        </RadioGroup>
+
+        <Button
+            android:id="@+id/buttonDiagnose"
+            style="?android:attr/buttonBarButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="연결 진단" />
 
         <Button
             android:id="@+id/buttonStart"

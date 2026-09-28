@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var button: Button
     private lateinit var info: TextView
     private lateinit var editKey: EditText
-    private lateinit var checkLive: CheckBox
+    private lateinit var radioEngine: android.widget.RadioGroup
 
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
 
@@ -79,8 +79,15 @@ class MainActivity : AppCompatActivity() {
         info = findViewById(R.id.textInfo)
         editKey = findViewById(R.id.editKey)
         editKey.setText(prefs.getString("geminiKey", ""))
-        checkLive = findViewById(R.id.checkLive)
-        checkLive.isChecked = prefs.getBoolean("live", true)
+        radioEngine = findViewById(R.id.radioEngine)
+        radioEngine.check(
+            when (prefs.getString("engine", "live")) {
+                "listen" -> R.id.engineListen
+                "basic" -> R.id.engineBasic
+                else -> R.id.engineLive
+            }
+        )
+        findViewById<Button>(R.id.buttonDiagnose).setOnClickListener { runDiagnosis() }
 
         spinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first }
@@ -108,9 +115,9 @@ class MainActivity : AppCompatActivity() {
             • 두 번 탭하면 종료 (알림창의 '중지'로도 종료)
 
             참고
-            • 'Gemini 실시간 통역'을 켜면 Gemini가 소리를 직접 듣고 바로 번역해요. 영상 언어는 자동으로 알아내요.
-              번역 음성까지 함께 내려받아서 데이터를 많이 써요 (1시간에 약 200MB 이상). Wi-Fi에서 쓰세요.
-              연결이 안 되면 자동으로 아래 기본 방식으로 바뀌어요.
+            • Gemini 실시간 통역: 소리를 흘려보내 바로 번역. 데이터를 많이 써요(1시간 200MB 이상). 안 되면 자동으로 '듣기 번역'으로 바뀌어요.
+            • Gemini 듣기 번역: 소리를 문장 단위로 잘라 Gemini가 직접 듣고 번역. 2~4초 늦지만 정확하고 자연스러워요. 언어 자동 감지.
+            • 연결이 안 되면 '연결 진단'을 눌러 결과를 복사해 보내 주세요.
             • 기본 방식에서는 자막이 세 단계로 바뀌어요: 흐린 글씨(말하는 중) → 조금 흐린 글씨(빠른 초벌 번역) → 선명한 글씨(Gemini가 다듬은 번역).
             • Gemini 키가 없으면 Google 번역만 써요. 무료 한도를 넘으면 잠시 초벌 번역만 나와요.
             • 넷플릭스처럼 소리 녹음을 막아 둔 앱은 '폰 소리 직접'이 동작하지 않아요. 이때는 '마이크로 듣기'를 쓰세요.
@@ -151,7 +158,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("offline", checkOffline.isChecked)
             .putBoolean("mic", radioMic.isChecked)
             .putString("geminiKey", editKey.text.toString().trim())
-            .putBoolean("live", checkLive.isChecked)
+            .putString("engine", selectedEngine())
             .apply()
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -205,6 +212,48 @@ class MainActivity : AppCompatActivity() {
         button.text = "자막 중지"
         toast("자막을 시작했어요. 이제 영상 앱을 열어 재생하세요.")
         moveTaskToBack(true)
+    }
+
+    private fun selectedEngine() = when (radioEngine.checkedRadioButtonId) {
+        R.id.engineListen -> "listen"
+        R.id.engineBasic -> "basic"
+        else -> "live"
+    }
+
+    /** 키·모델 연결 상태를 검사해 결과를 보여 줌 (복사해서 보낼 수 있게) */
+    private fun runDiagnosis() {
+        val key = editKey.text.toString().trim()
+        if (key.isEmpty()) {
+            toast("먼저 Gemini API 키를 입력하세요.")
+            return
+        }
+        prefs.edit().putString("geminiKey", key).apply()
+        val progress = android.app.AlertDialog.Builder(this)
+            .setTitle("연결 진단 중…")
+            .setMessage("최대 30초 정도 걸려요.")
+            .setCancelable(false)
+            .show()
+        Thread {
+            val report = Diagnostics.run(key)
+            runOnUiThread {
+                progress.dismiss()
+                val tv = TextView(this).apply {
+                    text = report
+                    setTextIsSelectable(true)
+                    setPadding(48, 24, 48, 0)
+                }
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("연결 진단 결과")
+                    .setView(android.widget.ScrollView(this).apply { addView(tv) })
+                    .setPositiveButton("복사") { _, _ ->
+                        val cm = getSystemService(android.content.ClipboardManager::class.java)
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("진단 결과", report))
+                        toast("복사했어요. 대화창에 붙여 넣어 주세요.")
+                    }
+                    .setNegativeButton("닫기", null)
+                    .show()
+            }
+        }.start()
     }
 
     private fun granted(p: String) =
