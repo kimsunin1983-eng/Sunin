@@ -57,7 +57,8 @@ class GeminiAudioTranslator(
     private var sendScheduled = false
     private val history = ArrayDeque<Pair<String, String>>()
 
-    @Volatile private var sendThinkingConfig = true
+    // "빠르게 답하기(thinkingBudget 0)" 설정을 거절한 모델 목록 → 이 모델엔 설정 없이 보냄
+    private val noThinking = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile private var closed = false
 
     /** 16kHz 16bit mono PCM, 100ms 단위 */
@@ -137,8 +138,9 @@ class GeminiAudioTranslator(
                 val (code, body) = post(model, wavB64)
                 when {
                     code == 200 -> return parse(body)
-                    code == 400 && sendThinkingConfig && body.contains("thinking", ignoreCase = true) -> {
-                        sendThinkingConfig = false
+                    code == 400 && model !in noThinking && !body.contains("API_KEY", ignoreCase = true) -> {
+                        // 이 모델이 thinkingConfig 를 거절 → 빼고 다시
+                        noThinking += model
                         continue
                     }
                     code == 401 || code == 403 || (code == 400 && body.contains("API_KEY", ignoreCase = true)) -> {
@@ -185,7 +187,7 @@ class GeminiAudioTranslator(
                         .put("required", JSONArray().put("src").put("ko"))
                 )
             )
-        if (sendThinkingConfig) generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+        if (model !in noThinking) generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
 
         val parts = JSONArray()
             .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", wavB64)))

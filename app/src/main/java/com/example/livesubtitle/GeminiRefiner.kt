@@ -27,7 +27,8 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
         }
     }
 
-    @Volatile private var sendThinkingConfig = true
+    // "빠르게 답하기(thinkingBudget 0)" 설정을 거절한 모델 목록 → 이 모델엔 설정 없이 보냄
+    private val noThinking = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     @Volatile private var cooldownUntil = 0L
     @Volatile var keyInvalid = false
         private set
@@ -56,9 +57,9 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
                 val (code, body) = post(model, prompt)
                 when {
                     code == 200 -> return parse(body, lines.size)
-                    code == 400 && sendThinkingConfig && body.contains("thinking", ignoreCase = true) -> {
-                        // 모델이 thinkingConfig 를 모르면 빼고 다시
-                        sendThinkingConfig = false
+                    code == 400 && model !in noThinking && !body.contains("API_KEY", ignoreCase = true) -> {
+                        // 이 모델이 thinkingConfig 를 거절 → 빼고 다시
+                        noThinking += model
                         continue
                     }
                     code == 400 && body.contains("API_KEY_INVALID") || code == 401 || code == 403 -> {
@@ -99,7 +100,7 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
                 "responseSchema",
                 JSONObject().put("type", "ARRAY").put("items", JSONObject().put("type", "STRING"))
             )
-        if (sendThinkingConfig) {
+        if (model !in noThinking) {
             // 빠른 응답을 위해 '생각하기' 끄기
             generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
         }
