@@ -98,31 +98,28 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
         attached = true
     }
 
-    private var currentIsFinal = false
+    /** PARTIAL: 말하는 중(흐림), DRAFT: 초벌 번역(조금 흐림), FINAL: 다듬어진 번역 */
+    enum class Tone(val alpha: Float) { PARTIAL(0.6f), DRAFT(0.85f), FINAL(1f) }
 
     fun setStatus(text: String) {
-        original.text = ""
+        previous.visibility = View.GONE
         original.visibility = View.GONE
         translated.text = text
         translated.alpha = 1f
-        currentIsFinal = false
     }
 
-    fun setOriginal(text: String) {
-        original.visibility = View.VISIBLE
-        original.text = text
-    }
-
-    /** final=false: 말하는 중의 임시 번역(흐리게), final=true: 문장 완성 번역 */
-    fun showTranslation(text: String, final: Boolean) {
-        // 새 문장이 시작되면 직전 완성 번역을 위 줄로 올림
-        if (currentIsFinal && translated.text.isNotEmpty()) {
-            previous.text = translated.text
+    /** 위: 직전 문장 번역 / 가운데: 지금 문장 원문 / 아래: 지금 문장 번역 */
+    fun render(previousText: String?, originalText: String, current: String, tone: Tone) {
+        if (previousText.isNullOrBlank()) {
+            previous.visibility = View.GONE
+        } else {
+            previous.text = previousText
             previous.visibility = View.VISIBLE
         }
-        translated.text = text
-        translated.alpha = if (final) 1f else 0.7f
-        currentIsFinal = final
+        original.text = originalText
+        original.visibility = View.VISIBLE
+        translated.text = current
+        translated.alpha = tone.alpha
     }
 
     fun remove() {

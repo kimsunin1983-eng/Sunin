@@ -12,6 +12,7 @@ import android.speech.SpeechRecognizer
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.Spinner
 import android.widget.TextView
@@ -42,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var checkOffline: CheckBox
     private lateinit var button: Button
     private lateinit var info: TextView
+    private lateinit var editKey: EditText
 
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
 
@@ -74,6 +76,8 @@ class MainActivity : AppCompatActivity() {
         checkOffline = findViewById(R.id.checkOffline)
         button = findViewById(R.id.buttonStart)
         info = findViewById(R.id.textInfo)
+        editKey = findViewById(R.id.editKey)
+        editKey.setText(prefs.getString("geminiKey", ""))
 
         spinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first }
@@ -101,7 +105,8 @@ class MainActivity : AppCompatActivity() {
             • 두 번 탭하면 종료 (알림창의 '중지'로도 종료)
 
             참고
-            • 번역은 인터넷(Google 번역)으로 하고, 인터넷이 안 되면 폰 안의 번역 모델을 써요.
+            • 자막은 세 단계로 바뀌어요: 흐린 글씨(말하는 중) → 조금 흐린 글씨(빠른 초벌 번역) → 선명한 글씨(Gemini가 다듬은 번역).
+            • Gemini 키가 없으면 Google 번역만 써요. 무료 한도를 넘으면 잠시 초벌 번역만 나와요.
             • 넷플릭스처럼 소리 녹음을 막아 둔 앱은 '폰 소리 직접'이 동작하지 않아요. 이때는 '마이크로 듣기'를 쓰세요.
             • 자막이 안 나오면 '오프라인 음성 인식 우선 사용'을 끄고 다시 시도해 보세요.
         """.trimIndent()
@@ -130,6 +135,7 @@ class MainActivity : AppCompatActivity() {
             .putInt("lang", spinner.selectedItemPosition)
             .putBoolean("offline", checkOffline.isChecked)
             .putBoolean("mic", radioMic.isChecked)
+            .putString("geminiKey", editKey.text.toString().trim())
             .apply()
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
@@ -173,6 +179,7 @@ class MainActivity : AppCompatActivity() {
     private fun launchService(mode: String, resultCode: Int, data: Intent?) {
         val intent = Intent(this, CaptionService::class.java).apply {
             putExtra(CaptionService.EXTRA_LANG, languages[spinner.selectedItemPosition].second)
+            putExtra(CaptionService.EXTRA_LANG_NAME, languages[spinner.selectedItemPosition].first)
             putExtra(CaptionService.EXTRA_MODE, mode)
             putExtra(CaptionService.EXTRA_OFFLINE, checkOffline.isChecked)
             putExtra(CaptionService.EXTRA_RESULT_CODE, resultCode)

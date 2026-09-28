@@ -19,10 +19,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.IntentCompat
@@ -41,7 +43,7 @@ import org.json.JSONArray
 import kotlin.concurrent.thread
 
 /**
- * 소리 → (폰 내장) 음성 인식 → 번역(온라인 Google, 실패 시 ML Kit 기기 내) → 자막 오버레이
+ * 소리 → (폰 내장) 음성 인식 → 초벌 번역(Google, 실패 시 ML Kit) → Gemini 다듬기(키가 있을 때) → 자막
  *
  * MODE_SYSTEM: 다른 앱에서 재생되는 소리를 AudioPlaybackCapture 로 가져와
  *              파이프로 음성 인식기에 직접 넣음 (Android 13+)
@@ -51,6 +53,7 @@ class CaptionService : Service() {
 
     companion object {
         const val EXTRA_LANG = "lang"
+        const val EXTRA_LANG_NAME = "langName"
         const val EXTRA_MODE = "mode"
         const val EXTRA_OFFLINE = "offline"
         const val EXTRA_RESULT_CODE = "resultCode"
@@ -102,6 +105,10 @@ class CaptionService : Service() {
 
         langTag = intent.getStringExtra(EXTRA_LANG) ?: "en-US"
         preferOffline = intent.getBooleanExtra(EXTRA_OFFLINE, true)
+        val key = getSharedPreferences("settings", MODE_PRIVATE).getString("geminiKey", "").orEmpty().trim()
+        if (key.isNotEmpty() && !langTag.startsWith("ko")) {
+            refiner = GeminiRefiner(key, intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag)
+        }
         useSystemAudio = intent.getStringExtra(EXTRA_MODE) == MODE_SYSTEM &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
@@ -332,20 +339,26 @@ class CaptionService : Service() {
         override fun onPartialResults(partialResults: Bundle?) {
             val text = firstResult(partialResults)?.trim() ?: return
             if (text.isEmpty()) return
-            overlay?.setOriginal(text)
+            partialOriginal = text
+            render()
             requestPartialTranslation(text)
         }
 
         override fun onResults(results: Bundle?) {
             consecutiveErrors = 0
             val text = firstResult(results)?.trim()
-            // 이 문장의 중간 번역 요청은 더 보내지 않음
+            val carriedDraft = partialDraft
+            // 이 문장의 중간 번역은 끝 → 다음 문장부터 새로
+            utterance++
             pendingPartial = null
             lastPartialSent = ""
+            partialOriginal = null
+            partialDraft = null
             if (!text.isNullOrEmpty()) {
                 gotAnyResult = true
-                overlay?.setOriginal(text)
-                translate(text)
+                addLine(text, carriedDraft)
+            } else {
+                render()
             }
             scheduleRestart(50)
         }
@@ -402,10 +415,8 @@ class CaptionService : Service() {
     // ───────────────────────── 번역 ─────────────────────────
     // 1순위: 온라인 Google 번역 (키 불필요, 품질 좋음, 모델 다운로드 없음)
     // 2순위: ML Kit 기기 내 번역 (인터넷이 안 될 때)
-    // 중간 번역과 최종 번역이 서로 기다리지 않도록 2개 스레드
-    private val netExecutor = Executors.newFixedThreadPool(2)
-    private var translateSeq = 0
-    private var shownSeq = 0
+    // 중간 번역·초벌 번역·Gemini 다듬기가 서로 기다리지 않도록 3개 스레드
+    private val netExecutor = Executors.newFixedThreadPool(3)
     private var partialInFlight = false
     private var pendingPartial: String? = null
     private var lastPartialSent = ""
@@ -431,35 +442,69 @@ class CaptionService : Service() {
             .addOnFailureListener { Log.w(TAG, "ML Kit model download failed", it) }
     }
 
-    private fun translate(text: String) {
+    // ── 자막 상태: 완성된 문장 목록 + 지금 말하는 중인 문장 ──
+    private class Line(val original: String) {
+        var draft: String? = null   // Google 초벌 번역
+        var refined: String? = null // Gemini 다듬은 번역
+        val best get() = refined ?: draft
+    }
+
+    private val lines = ArrayList<Line>()
+    private var utterance = 0
+    private var partialOriginal: String? = null
+    private var partialDraft: String? = null
+
+    private fun addLine(text: String, carriedDraft: String?) {
+        val line = Line(text)
         if (langTag.startsWith("ko")) {
-            overlay?.showTranslation(text, final = true)
+            line.draft = text
+        } else {
+            line.draft = carriedDraft // 진짜 초벌 번역이 오기 전까지 중간 번역을 잠시 보여 줌
+            translateDraft(line)
+            enqueueRefine(line)
+        }
+        lines += line
+        if (lines.size > 40) lines.removeAt(0)
+        render()
+    }
+
+    private fun render() {
+        val o = overlay ?: return
+        val pOrig = partialOriginal
+        if (pOrig != null) {
+            o.render(lines.lastOrNull()?.best, pOrig, partialDraft ?: "", SubtitleOverlay.Tone.PARTIAL)
             return
         }
-        val seq = ++translateSeq
+        val last = lines.lastOrNull() ?: return
+        val tone = when {
+            last.refined != null || refiner == null -> SubtitleOverlay.Tone.FINAL
+            else -> SubtitleOverlay.Tone.DRAFT
+        }
+        o.render(lines.getOrNull(lines.size - 2)?.best, last.original, last.best ?: "…", tone)
+    }
+
+    /** 초벌 번역: 온라인 Google 번역, 안 되면 ML Kit */
+    private fun translateDraft(line: Line) {
         netExecutor.execute {
-            val online = runCatching { translateOnline(text) }
+            val online = runCatching { translateOnline(line.original) }
                 .onFailure { Log.w(TAG, "online translate failed", it) }
                 .getOrNull()
             main.post {
                 if (online != null) {
-                    show(seq, online, final = true)
+                    line.draft = online
+                    render()
                 } else {
-                    translateOffline(seq, text)
+                    val t = translator
+                    if (t != null && translatorReady) {
+                        t.translate(line.original)
+                            .addOnSuccessListener { line.draft = it; render() }
+                    } else if (line.draft == null) {
+                        line.draft = "(번역 실패: 인터넷 연결을 확인하세요)"
+                        render()
+                    }
                 }
             }
         }
-    }
-
-    private fun translateOffline(seq: Int, text: String) {
-        val t = translator
-        if (t == null || !translatorReady) {
-            show(seq, "(번역 실패: 인터넷 연결을 확인하세요)", final = true)
-            return
-        }
-        t.translate(text)
-            .addOnSuccessListener { show(seq, it, final = true) }
-            .addOnFailureListener { show(seq, "(번역 실패)", final = true) }
     }
 
     /**
@@ -468,7 +513,8 @@ class CaptionService : Service() {
      */
     private fun requestPartialTranslation(text: String) {
         if (langTag.startsWith("ko")) {
-            overlay?.showTranslation(text, final = false)
+            partialDraft = text
+            render()
             return
         }
         if (text.length < 4 || text == lastPartialSent) return
@@ -478,11 +524,15 @@ class CaptionService : Service() {
         }
         partialInFlight = true
         lastPartialSent = text
-        val seq = ++translateSeq
+        val utt = utterance
         netExecutor.execute {
             val r = runCatching { translateOnline(text) }.getOrNull()
             main.post {
-                if (r != null) show(seq, r, final = false)
+                // 그사이 문장이 끝났으면 버림
+                if (r != null && utt == utterance && partialOriginal != null) {
+                    partialDraft = r
+                    render()
+                }
                 // 번역 서버에 너무 자주 요청하지 않도록 잠깐 쉬었다가 최신 것만 이어서 요청
                 main.postDelayed({
                     partialInFlight = false
@@ -494,11 +544,58 @@ class CaptionService : Service() {
         }
     }
 
-    /** 늦게 도착한 옛 번역이 새 번역을 덮어쓰지 않도록 순서 확인 */
-    private fun show(seq: Int, translated: String, final: Boolean) {
-        if (stopped || seq < shownSeq) return
-        shownSeq = seq
-        overlay?.showTranslation(translated, final)
+    // ── Gemini 다듬기: 문장들을 모아 4초에 한 번 이하로 보냄 (무료 한도: 1분 약 15회) ──
+    private var refiner: GeminiRefiner? = null
+    private val refineQueue = ArrayList<Line>()
+    private var refineInFlight = false
+    private var lastRefineAt = 0L
+    private var warnedKey = false
+    private val refineRunnable = Runnable { runRefine() }
+
+    private fun enqueueRefine(line: Line) {
+        if (refiner == null) return
+        refineQueue += line
+        scheduleRefine()
+    }
+
+    private fun scheduleRefine() {
+        if (stopped || refineInFlight || refineQueue.isEmpty()) return
+        main.removeCallbacks(refineRunnable)
+        val since = SystemClock.elapsedRealtime() - lastRefineAt
+        // 바로 이어지는 문장을 함께 묶도록 최소 1.2초는 모았다가 보냄
+        main.postDelayed(refineRunnable, maxOf(1200L, 4000L - since))
+    }
+
+    private fun runRefine() {
+        val r = refiner ?: return
+        if (stopped || refineInFlight || refineQueue.isEmpty()) return
+        val batch = refineQueue.take(8)
+        refineQueue.subList(0, batch.size).clear()
+        val firstIdx = lines.indexOf(batch.first())
+        val context = if (firstIdx > 0) {
+            lines.subList(maxOf(0, firstIdx - 6), firstIdx).map {
+                GeminiRefiner.Context(it.original, it.best.orEmpty())
+            }
+        } else {
+            emptyList()
+        }
+        val originals = batch.map { it.original }
+        refineInFlight = true
+        lastRefineAt = SystemClock.elapsedRealtime()
+        netExecutor.execute {
+            val result = runCatching { r.refine(context, originals) }.getOrNull()
+            main.post {
+                refineInFlight = false
+                if (stopped) return@post
+                result?.forEachIndexed { i, t -> if (t != null) batch[i].refined = t }
+                if (r.keyInvalid && !warnedKey) {
+                    warnedKey = true
+                    Toast.makeText(this, "Gemini API 키가 올바르지 않아요. 앱에서 키를 확인해 주세요. (지금은 Google 번역만 사용)", Toast.LENGTH_LONG).show()
+                }
+                render()
+                scheduleRefine()
+            }
+        }
     }
 
     private fun translateOnline(text: String): String {

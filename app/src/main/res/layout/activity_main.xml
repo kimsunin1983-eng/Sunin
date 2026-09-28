@@ -62,6 +62,29 @@
             android:checked="true"
             android:text="오프라인 음성 인식 우선 사용" />
 
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="AI 자연스러운 번역 (Gemini API 키)"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/editKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="비워 두면 Google 번역만 사용"
+            android:importantForAutofill="no"
+            android:inputType="textPassword"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:autoLink="web"
+            android:text="무료 키 받기: https://aistudio.google.com/apikey"
+            android:textSize="13sp" />
+
         <Button
             android:id="@+id/buttonStart"
             android:layout_width="match_parent"
