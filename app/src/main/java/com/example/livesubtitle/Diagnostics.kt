@@ -40,37 +40,28 @@ object Diagnostics {
 
         // 2) 일반 요청 (다듬기·듣기 번역에 쓰는 방식)
         for (model in listOf("gemini-flash-latest", "gemini-flash-lite-latest")) {
+            val t0 = System.currentTimeMillis()
             val (c, b) = post("$BASE/models/$model:generateContent", key,
-                """{"contents":[{"parts":[{"text":"OK 라고만 답해"}]}]}""")
-            if (c == 200) append("✅ ").append(model).append(" 일반 요청 성공\n")
-            else append("❌ ").append(model).append(" (HTTP ").append(c).append("): ").append(err(b)).append('\n')
+                """{"contents":[{"parts":[{"text":"OK 라고만 답해"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}""")
+            val ms = System.currentTimeMillis() - t0
+            if (c == 200) append("✅ ").append(model).append(" 일반 요청 성공 (").append(ms).append("ms)\n")
+            else append("❌ ").append(model).append(" (HTTP ").append(c).append(", ").append(ms).append("ms): ").append(err(b)).append('\n')
         }
 
         // 3) 실시간 통역 연결
         append('\n')
-        append("실시간 통역 (키를 헤더로): ").append(liveTest(key, false)).append('\n')
-        append("실시간 통역 (키를 주소로): ").append(liveTest(key, true)).append('\n')
+        append("실시간 통역 (번역 설정 A): ").append(liveTest(key, true)).append('\n')
+        append("실시간 통역 (번역 설정 B): ").append(liveTest(key, false)).append('\n')
     }
 
-    private fun liveTest(key: String, inQuery: Boolean): String {
+    private fun liveTest(key: String, translationInGenerationConfig: Boolean): String {
         val http = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
         val base = "wss://generativelanguage.googleapis.com/ws/" +
             "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-        val req = if (inQuery) Request.Builder().url("$base?key=$key").build()
-        else Request.Builder().url(base).header("x-goog-api-key", key).build()
+        val req = Request.Builder().url(base).header("x-goog-api-key", key).build()
         val done = CountDownLatch(1)
         var result = "⏱ 10초 동안 응답 없음"
-        val setup = JSONObject().put(
-            "setup", JSONObject()
-                .put("model", "models/${LiveTranslateClient.MODEL}")
-                .put(
-                    "generationConfig", JSONObject()
-                        .put("responseModalities", org.json.JSONArray().put("AUDIO"))
-                        .put("inputAudioTranscription", JSONObject())
-                        .put("outputAudioTranscription", JSONObject())
-                        .put("translationConfig", JSONObject().put("targetLanguageCode", "ko").put("echoTargetLanguage", true))
-                )
-        ).toString()
+        val setup = LiveTranslateClient.buildSetup(translationInGenerationConfig).toString()
         val ws = http.newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 webSocket.send(setup)

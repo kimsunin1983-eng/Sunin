@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.livesubtitle"
         minSdk = 29
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.2"
+        versionCode = 8
+        versionName = "2.3"
     }
 
     // 빌드할 때마다 같은 키로 서명해야 새 버전을 삭제 없이 덮어 설치할 수 있음

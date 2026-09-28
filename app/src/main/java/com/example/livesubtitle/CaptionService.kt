@@ -718,12 +718,17 @@ class CaptionService : Service() {
         usingLive = true
         if (!gotAnyResult) overlay?.setStatus("Gemini 실시간 통역 연결 중…")
         lateinit var client: LiveTranslateClient
-        // 실패할 때마다 키 전달 방식을 번갈아 시도 (헤더 → 주소 → 헤더 → 주소)
-        val keyInQuery = liveFailures % 2 == 1
-        client = LiveTranslateClient(geminiKey, keyInQuery, object : LiveTranslateClient.Listener {
+        // 번역 설정 위치를 번갈아 시도 (generationConfig 안 → setup 바로 아래 …), 성공한 방식은 기억
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val remembered = prefs.getInt("liveTranslationPlacement", -1)
+        val inGenConfig = if (remembered >= 0 && liveFailures == 0) remembered == 1 else liveFailures % 2 == 0
+        client = LiveTranslateClient(geminiKey, false, inGenConfig, object : LiveTranslateClient.Listener {
             override fun onReady() = main.post {
                 if (liveClient === client) {
-                    getSharedPreferences("settings", MODE_PRIVATE).edit().remove("lastLiveError").apply()
+                    getSharedPreferences("settings", MODE_PRIVATE).edit()
+                        .remove("lastLiveError")
+                        .putInt("liveTranslationPlacement", if (inGenConfig) 1 else 0)
+                        .apply()
                 }
                 if (liveClient === client && !gotAnyResult) {
                     overlay?.setStatus("실시간 통역 연결됨 · 영상을 재생하세요")

@@ -27,6 +27,8 @@ class LiveTranslateClient(
     private val apiKey: String,
     /** false: 키를 x-goog-api-key 헤더로 전송 (새 AQ. 형식 키는 이 방식만 됨), true: 주소 뒤 ?key= */
     private val keyInQuery: Boolean,
+    /** translationConfig 를 generationConfig 안에 넣을지(true), setup 바로 아래에 넣을지(false) */
+    private val translationInGenerationConfig: Boolean,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -81,24 +83,7 @@ class LiveTranslateClient(
         })
     }
 
-    private fun setupMessage(): String {
-        val setup = JSONObject()
-            .put("model", "models/$MODEL")
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("responseModalities", org.json.JSONArray().put("AUDIO"))
-                    .put("inputAudioTranscription", JSONObject())
-                    .put("outputAudioTranscription", JSONObject())
-                    .put(
-                        "translationConfig",
-                        JSONObject()
-                            .put("targetLanguageCode", "ko")
-                            .put("echoTargetLanguage", true) // 한국어 대사는 그대로
-                    )
-            )
-        return JSONObject().put("setup", setup).toString()
-    }
+    private fun setupMessage(): String = buildSetup(translationInGenerationConfig).toString()
 
     private fun handle(text: String) {
         val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -152,6 +137,26 @@ class LiveTranslateClient(
 
     companion object {
         const val MODEL = "gemini-3.5-live-translate-preview"
+
+        /** 받아쓰기(input/outputAudioTranscription)는 setup 바로 아래 항목 */
+        fun buildSetup(translationInGenerationConfig: Boolean): JSONObject {
+            val translation = JSONObject()
+                .put("targetLanguageCode", "ko")
+                .put("echoTargetLanguage", true) // 한국어 대사는 그대로
+            val generationConfig = JSONObject()
+                .put("responseModalities", org.json.JSONArray().put("AUDIO"))
+            val setup = JSONObject()
+                .put("model", "models/$MODEL")
+                .put("inputAudioTranscription", JSONObject())
+                .put("outputAudioTranscription", JSONObject())
+            if (translationInGenerationConfig) {
+                generationConfig.put("translationConfig", translation)
+            } else {
+                setup.put("translationConfig", translation)
+            }
+            setup.put("generationConfig", generationConfig)
+            return JSONObject().put("setup", setup)
+        }
         private const val TAG = "LiveSubtitle"
     }
 }

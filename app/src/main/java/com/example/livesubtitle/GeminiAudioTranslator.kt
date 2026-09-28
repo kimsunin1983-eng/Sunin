@@ -31,7 +31,15 @@ class GeminiAudioTranslator(
         fun onError(message: String, fatal: Boolean)
     }
 
-    private val models = listOf("gemini-flash-latest", "gemini-flash-lite-latest")
+    // 응답이 없거나 한도에 걸린 모델은 뒤로 보내서 다음부터 다른 모델을 먼저 씀
+    private val models = java.util.concurrent.CopyOnWriteArrayList(listOf("gemini-flash-latest", "gemini-flash-lite-latest"))
+
+    private fun demote(model: String) {
+        if (models.size > 1 && models.first() == model) {
+            models.remove(model)
+            models.add(model)
+        }
+    }
     private val worker = Executors.newSingleThreadScheduledExecutor()
 
     // ── 소리 자르기 (캡처 스레드에서 호출) ──
@@ -122,7 +130,7 @@ class GeminiAudioTranslator(
     /** 성공 시 자막 목록(말이 없으면 빈 목록), 실패 시 null */
     private fun request(pcm: ByteArray): List<Pair<String, String>>? {
         val wavB64 = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
-        for (model in models) {
+        for (model in models.toList()) {
             var attempt = 0
             while (attempt < 2) {
                 attempt++
@@ -140,6 +148,7 @@ class GeminiAudioTranslator(
                     }
                     code == 429 || code == 404 || code >= 500 || code == -1 -> {
                         Log.w(TAG, "Gemini audio $model HTTP $code: ${body.take(200)}")
+                        demote(model)
                         break
                     }
                     else -> {
@@ -191,7 +200,7 @@ class GeminiAudioTranslator(
         return try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 5000
-            conn.readTimeout = 15000
+            conn.readTimeout = 8000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("x-goog-api-key", apiKey)

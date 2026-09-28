@@ -17,7 +17,15 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
 
     data class Context(val original: String, val translated: String)
 
-    private val models = listOf("gemini-flash-latest", "gemini-flash-lite-latest")
+    // 응답이 없거나 한도에 걸린 모델은 뒤로 보내서 다음부터 다른 모델을 먼저 씀
+    private val models = java.util.concurrent.CopyOnWriteArrayList(listOf("gemini-flash-latest", "gemini-flash-lite-latest"))
+
+    private fun demote(model: String) {
+        if (models.size > 1 && models.first() == model) {
+            models.remove(model)
+            models.add(model)
+        }
+    }
 
     @Volatile private var sendThinkingConfig = true
     @Volatile private var cooldownUntil = 0L
@@ -41,7 +49,7 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
         if (keyInvalid || System.currentTimeMillis() < cooldownUntil) return null
         val prompt = buildPrompt(context, lines)
 
-        for (model in models) {
+        for (model in models.toList()) {
             var attempt = 0
             while (attempt < 2) {
                 attempt++
@@ -57,7 +65,10 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
                         keyInvalid = true
                         return null
                     }
-                    code == 429 || code == 404 || code >= 500 -> break // 다음 모델로
+                    code == 429 || code == 404 || code >= 500 || code == -1 -> {
+                        demote(model)
+                        break // 다음 모델로
+                    }
                     else -> {
                         Log.w(TAG, "Gemini $model HTTP $code: ${body.take(300)}")
                         return null
@@ -108,7 +119,7 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
         return try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 5000
-            conn.readTimeout = 10000
+            conn.readTimeout = 8000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("x-goog-api-key", apiKey)
