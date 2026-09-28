@@ -215,15 +215,27 @@ class CaptionService : Service() {
 
             captureThread = thread(name = "audio-capture") {
                 val buf = ByteArray(SAMPLE_RATE / 10 * 2) // 100ms
+                // 인식기가 재시작하는 짧은 틈의 소리를 최대 1.5초 보관 → 문장 앞부분이 잘리지 않게
+                val backlogMax = SAMPLE_RATE * 2 * 3 / 2
+                var backlog = ByteArray(0)
                 while (!stopped) {
                     val n = record.read(buf, 0, buf.size)
                     if (n <= 0) continue
-                    val out = pipeOut ?: continue // 인식기 재시작 사이에는 버림
+                    val out = pipeOut
+                    if (out == null) {
+                        backlog = (backlog + buf.copyOf(n)).takeLast(backlogMax)
+                        continue
+                    }
                     try {
+                        if (backlog.isNotEmpty()) {
+                            out.write(backlog)
+                            backlog = ByteArray(0)
+                        }
                         out.write(buf, 0, n)
                     } catch (e: IOException) {
-                        // 인식기가 한 문장을 끝내고 파이프를 닫음 → 다음 세션을 기다림
+                        // 인식기가 한 문장을 끝내고 파이프를 닫음 → 다음 세션까지 모아 둠
                         if (pipeOut === out) pipeOut = null
+                        backlog = (backlog + buf.copyOf(n)).takeLast(backlogMax)
                     }
                 }
             }
@@ -233,6 +245,9 @@ class CaptionService : Service() {
             false
         }
     }
+
+    private fun ByteArray.takeLast(max: Int): ByteArray =
+        if (size <= max) this else copyOfRange(size - max, size)
 
     // ───────────────────────── 음성 인식 ─────────────────────────
     private fun createRecognizer() {
@@ -257,6 +272,8 @@ class CaptionService : Service() {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 600L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 400L)
         }
 
     private fun startListening() {
@@ -313,13 +330,18 @@ class CaptionService : Service() {
         override fun onEvent(eventType: Int, params: Bundle?) {}
 
         override fun onPartialResults(partialResults: Bundle?) {
-            val text = firstResult(partialResults) ?: return
-            if (text.isNotBlank()) overlay?.setOriginal(text)
+            val text = firstResult(partialResults)?.trim() ?: return
+            if (text.isEmpty()) return
+            overlay?.setOriginal(text)
+            requestPartialTranslation(text)
         }
 
         override fun onResults(results: Bundle?) {
             consecutiveErrors = 0
             val text = firstResult(results)?.trim()
+            // 이 문장의 중간 번역 요청은 더 보내지 않음
+            pendingPartial = null
+            lastPartialSent = ""
             if (!text.isNullOrEmpty()) {
                 gotAnyResult = true
                 overlay?.setOriginal(text)
@@ -380,9 +402,13 @@ class CaptionService : Service() {
     // ───────────────────────── 번역 ─────────────────────────
     // 1순위: 온라인 Google 번역 (키 불필요, 품질 좋음, 모델 다운로드 없음)
     // 2순위: ML Kit 기기 내 번역 (인터넷이 안 될 때)
-    private val netExecutor = Executors.newSingleThreadExecutor()
+    // 중간 번역과 최종 번역이 서로 기다리지 않도록 2개 스레드
+    private val netExecutor = Executors.newFixedThreadPool(2)
     private var translateSeq = 0
     private var shownSeq = 0
+    private var partialInFlight = false
+    private var pendingPartial: String? = null
+    private var lastPartialSent = ""
 
     private fun sourceLanguage(): String? =
         TranslateLanguage.fromLanguageTag(langTag.substringBefore('-'))
@@ -407,7 +433,7 @@ class CaptionService : Service() {
 
     private fun translate(text: String) {
         if (langTag.startsWith("ko")) {
-            overlay?.setTranslated(text)
+            overlay?.showTranslation(text, final = true)
             return
         }
         val seq = ++translateSeq
@@ -417,7 +443,7 @@ class CaptionService : Service() {
                 .getOrNull()
             main.post {
                 if (online != null) {
-                    show(seq, online)
+                    show(seq, online, final = true)
                 } else {
                     translateOffline(seq, text)
                 }
@@ -428,19 +454,51 @@ class CaptionService : Service() {
     private fun translateOffline(seq: Int, text: String) {
         val t = translator
         if (t == null || !translatorReady) {
-            show(seq, "(번역 실패: 인터넷 연결을 확인하세요)")
+            show(seq, "(번역 실패: 인터넷 연결을 확인하세요)", final = true)
             return
         }
         t.translate(text)
-            .addOnSuccessListener { show(seq, it) }
-            .addOnFailureListener { show(seq, "(번역 실패)") }
+            .addOnSuccessListener { show(seq, it, final = true) }
+            .addOnFailureListener { show(seq, "(번역 실패)", final = true) }
+    }
+
+    /**
+     * 말하는 도중의 부분 인식 결과도 번역해서 먼저 보여 줌 (흐리게 표시).
+     * 동시에 한 건만 요청하고, 그 사이 들어온 것은 가장 최신 것만 이어서 요청.
+     */
+    private fun requestPartialTranslation(text: String) {
+        if (langTag.startsWith("ko")) {
+            overlay?.showTranslation(text, final = false)
+            return
+        }
+        if (text.length < 4 || text == lastPartialSent) return
+        if (partialInFlight) {
+            pendingPartial = text
+            return
+        }
+        partialInFlight = true
+        lastPartialSent = text
+        val seq = ++translateSeq
+        netExecutor.execute {
+            val r = runCatching { translateOnline(text) }.getOrNull()
+            main.post {
+                if (r != null) show(seq, r, final = false)
+                // 번역 서버에 너무 자주 요청하지 않도록 잠깐 쉬었다가 최신 것만 이어서 요청
+                main.postDelayed({
+                    partialInFlight = false
+                    val next = pendingPartial
+                    pendingPartial = null
+                    if (next != null) requestPartialTranslation(next)
+                }, 300)
+            }
+        }
     }
 
     /** 늦게 도착한 옛 번역이 새 번역을 덮어쓰지 않도록 순서 확인 */
-    private fun show(seq: Int, translated: String) {
+    private fun show(seq: Int, translated: String, final: Boolean) {
         if (stopped || seq < shownSeq) return
         shownSeq = seq
-        overlay?.setTranslated(translated)
+        overlay?.showTranslation(translated, final)
     }
 
     private fun translateOnline(text: String): String {
@@ -450,8 +508,8 @@ class CaptionService : Service() {
                 "&sl=" + src + "&tl=ko&q=" + URLEncoder.encode(text, "UTF-8")
         )
         val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 4000
-        conn.readTimeout = 4000
+        conn.connectTimeout = 3000
+        conn.readTimeout = 3000
         conn.setRequestProperty("User-Agent", "Mozilla/5.0")
         try {
             if (conn.responseCode != 200) throw IOException("HTTP ${conn.responseCode}")

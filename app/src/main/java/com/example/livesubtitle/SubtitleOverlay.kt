@@ -21,6 +21,13 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
     private val density = context.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).toInt()
 
+    private val previous = TextView(context).apply {
+        setTextColor(Color.parseColor("#9FFFFFFF"))
+        textSize = 14f
+        maxLines = 2
+        visibility = View.GONE
+    }
+
     private val original = TextView(context).apply {
         setTextColor(Color.parseColor("#B8B8B8"))
         textSize = 13f
@@ -42,6 +49,7 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
             setColor(Color.parseColor("#C8000000"))
             cornerRadius = dp(12).toFloat()
         }
+        addView(previous)
         addView(original)
         addView(translated)
     }
@@ -90,10 +98,14 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
         attached = true
     }
 
+    private var currentIsFinal = false
+
     fun setStatus(text: String) {
         original.text = ""
         original.visibility = View.GONE
         translated.text = text
+        translated.alpha = 1f
+        currentIsFinal = false
     }
 
     fun setOriginal(text: String) {
@@ -101,8 +113,16 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
         original.text = text
     }
 
-    fun setTranslated(text: String) {
+    /** final=false: 말하는 중의 임시 번역(흐리게), final=true: 문장 완성 번역 */
+    fun showTranslation(text: String, final: Boolean) {
+        // 새 문장이 시작되면 직전 완성 번역을 위 줄로 올림
+        if (currentIsFinal && translated.text.isNotEmpty()) {
+            previous.text = translated.text
+            previous.visibility = View.VISIBLE
+        }
         translated.text = text
+        translated.alpha = if (final) 1f else 0.7f
+        currentIsFinal = final
     }
 
     fun remove() {
