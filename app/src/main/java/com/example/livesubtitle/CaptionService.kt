@@ -33,10 +33,15 @@ import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
 import java.io.IOException
 import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.util.concurrent.Executors
+import org.json.JSONArray
 import kotlin.concurrent.thread
 
 /**
- * 소리 → (폰 내장) 음성 인식 → ML Kit 번역(기기 내) → 자막 오버레이
+ * 소리 → (폰 내장) 음성 인식 → 번역(온라인 Google, 실패 시 ML Kit 기기 내) → 자막 오버레이
  *
  * MODE_SYSTEM: 다른 앱에서 재생되는 소리를 AudioPlaybackCapture 로 가져와
  *              파이프로 음성 인식기에 직접 넣음 (Android 13+)
@@ -372,11 +377,17 @@ class CaptionService : Service() {
     private fun firstResult(b: Bundle?): String? =
         b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
 
-    // ───────────────────────── 번역 (ML Kit, 기기 내) ─────────────────────────
+    // ───────────────────────── 번역 ─────────────────────────
+    // 1순위: 온라인 Google 번역 (키 불필요, 품질 좋음, 모델 다운로드 없음)
+    // 2순위: ML Kit 기기 내 번역 (인터넷이 안 될 때)
+    private val netExecutor = Executors.newSingleThreadExecutor()
+    private var translateSeq = 0
+    private var shownSeq = 0
+
     private fun sourceLanguage(): String? =
         TranslateLanguage.fromLanguageTag(langTag.substringBefore('-'))
 
-    private fun translatorReadyOrNotNeeded() = translator == null || translatorReady
+    private fun translatorReadyOrNotNeeded() = true
 
     private fun setupTranslator() {
         val src = sourceLanguage()
@@ -388,30 +399,75 @@ class CaptionService : Service() {
                 .build()
         )
         translator = t
-        overlay?.setStatus("번역 모델 준비 중… (처음 한 번만 약 30MB 다운로드)")
+        // 오프라인 대비용 모델은 뒤에서 조용히 내려받음
         t.downloadModelIfNeeded(DownloadConditions.Builder().build())
-            .addOnSuccessListener {
-                translatorReady = true
-                if (!gotAnyResult) overlay?.setStatus("듣는 중… 영상을 재생하세요")
-            }
-            .addOnFailureListener {
-                overlay?.setStatus("번역 모델을 받지 못했어요. 인터넷 연결을 확인하세요.")
-            }
+            .addOnSuccessListener { translatorReady = true; Log.i(TAG, "ML Kit model ready") }
+            .addOnFailureListener { Log.w(TAG, "ML Kit model download failed", it) }
     }
 
     private fun translate(text: String) {
-        val t = translator
-        if (t == null) {
+        if (langTag.startsWith("ko")) {
             overlay?.setTranslated(text)
             return
         }
-        if (!translatorReady) {
-            overlay?.setTranslated("(번역 모델 받는 중…)")
+        val seq = ++translateSeq
+        netExecutor.execute {
+            val online = runCatching { translateOnline(text) }
+                .onFailure { Log.w(TAG, "online translate failed", it) }
+                .getOrNull()
+            main.post {
+                if (online != null) {
+                    show(seq, online)
+                } else {
+                    translateOffline(seq, text)
+                }
+            }
+        }
+    }
+
+    private fun translateOffline(seq: Int, text: String) {
+        val t = translator
+        if (t == null || !translatorReady) {
+            show(seq, "(번역 실패: 인터넷 연결을 확인하세요)")
             return
         }
         t.translate(text)
-            .addOnSuccessListener { overlay?.setTranslated(it) }
-            .addOnFailureListener { overlay?.setTranslated("(번역 실패)") }
+            .addOnSuccessListener { show(seq, it) }
+            .addOnFailureListener { show(seq, "(번역 실패)") }
+    }
+
+    /** 늦게 도착한 옛 번역이 새 번역을 덮어쓰지 않도록 순서 확인 */
+    private fun show(seq: Int, translated: String) {
+        if (stopped || seq < shownSeq) return
+        shownSeq = seq
+        overlay?.setTranslated(translated)
+    }
+
+    private fun translateOnline(text: String): String {
+        val src = if (langTag.startsWith("zh")) langTag else langTag.substringBefore('-')
+        val url = URL(
+            "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
+                "&sl=" + src + "&tl=ko&q=" + URLEncoder.encode(text, "UTF-8")
+        )
+        val conn = url.openConnection() as HttpURLConnection
+        conn.connectTimeout = 4000
+        conn.readTimeout = 4000
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+        try {
+            if (conn.responseCode != 200) throw IOException("HTTP ${conn.responseCode}")
+            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val parts = JSONArray(body).getJSONArray(0)
+            val sb = StringBuilder()
+            for (i in 0 until parts.length()) {
+                val piece = parts.optJSONArray(i)?.optString(0).orEmpty()
+                if (piece != "null") sb.append(piece)
+            }
+            val result = sb.toString().trim()
+            if (result.isEmpty()) throw IOException("empty result")
+            return result
+        } finally {
+            conn.disconnect()
+        }
     }
 
     // ───────────────────────── 정리 ─────────────────────────
@@ -435,6 +491,7 @@ class CaptionService : Service() {
         runCatching { projection?.stop() }
         projection = null
 
+        runCatching { netExecutor.shutdownNow() }
         runCatching { translator?.close() }
         overlay?.remove()
         overlay = null

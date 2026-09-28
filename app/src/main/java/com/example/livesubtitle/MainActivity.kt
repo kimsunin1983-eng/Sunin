@@ -25,7 +25,8 @@ class MainActivity : AppCompatActivity() {
     private val languages = listOf(
         "영어" to "en-US",
         "일본어" to "ja-JP",
-        "중국어" to "zh-CN",
+        "중국어 (중국 본토)" to "zh-CN",
+        "중국어 (대만)" to "zh-TW",
         "스페인어" to "es-ES",
         "프랑스어" to "fr-FR",
         "독일어" to "de-DE",
@@ -100,7 +101,7 @@ class MainActivity : AppCompatActivity() {
             • 두 번 탭하면 종료 (알림창의 '중지'로도 종료)
 
             참고
-            • 처음 쓰는 언어는 번역 모델(약 30MB)을 한 번 내려받아요.
+            • 번역은 인터넷(Google 번역)으로 하고, 인터넷이 안 되면 폰 안의 번역 모델을 써요.
             • 넷플릭스처럼 소리 녹음을 막아 둔 앱은 '폰 소리 직접'이 동작하지 않아요. 이때는 '마이크로 듣기'를 쓰세요.
             • 자막이 안 나오면 '오프라인 음성 인식 우선 사용'을 끄고 다시 시도해 보세요.
         """.trimIndent()
