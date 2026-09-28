@@ -25,6 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class LiveTranslateClient(
     private val apiKey: String,
+    /** false: 키를 x-goog-api-key 헤더로 전송 (새 AQ. 형식 키는 이 방식만 됨), true: 주소 뒤 ?key= */
+    private val keyInQuery: Boolean,
     private val listener: Listener,
 ) {
     interface Listener {
@@ -47,9 +49,14 @@ class LiveTranslateClient(
     private val closed = AtomicBoolean(false)
 
     fun connect() {
-        val url = "wss://generativelanguage.googleapis.com/ws/" +
-            "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
-        ws = http.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
+        val base = "wss://generativelanguage.googleapis.com/ws/" +
+            "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        val request = if (keyInQuery) {
+            Request.Builder().url("$base?key=$apiKey").build()
+        } else {
+            Request.Builder().url(base).header("x-goog-api-key", apiKey).build()
+        }
+        ws = http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 webSocket.send(setupMessage())
             }

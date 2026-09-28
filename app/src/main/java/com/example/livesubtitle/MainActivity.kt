@@ -117,6 +117,8 @@ class MainActivity : AppCompatActivity() {
             • 자막이 안 나오면 '오프라인 음성 인식 우선 사용'을 끄고 다시 시도해 보세요.
         """.trimIndent()
 
+        info.setTextIsSelectable(true)
+
         button.setOnClickListener {
             if (CaptionService.isRunning) {
                 stopService(Intent(this, CaptionService::class.java))
@@ -134,6 +136,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButton() {
         button.text = if (CaptionService.isRunning) "자막 중지" else "자막 시작"
+        val err = prefs.getString("lastLiveError", null)
+        val base = info.tag as? String ?: info.text.toString().also { info.tag = it }
+        info.text = if (err != null) {
+            "⚠ 최근 실시간 통역 연결 실패 사유 (길게 눌러 복사):\n$err\n\n$base"
+        } else {
+            base
+        }
     }
 
     private fun start() {

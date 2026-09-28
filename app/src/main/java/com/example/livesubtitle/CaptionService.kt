@@ -696,6 +696,7 @@ class CaptionService : Service() {
     @Volatile private var liveClient: LiveTranslateClient? = null
     @Volatile private var usingLive = false
     private var liveFailures = 0
+    private var lastLiveError: String? = null
     private val liveIn = StringBuilder()
     private val liveOut = StringBuilder()
     private val liveSilenceRunnable = Runnable { finalizeLive() }
@@ -705,8 +706,13 @@ class CaptionService : Service() {
         usingLive = true
         if (!gotAnyResult) overlay?.setStatus("Gemini 실시간 통역 연결 중…")
         lateinit var client: LiveTranslateClient
-        client = LiveTranslateClient(geminiKey, object : LiveTranslateClient.Listener {
+        // 실패할 때마다 키 전달 방식을 번갈아 시도 (헤더 → 주소 → 헤더 → 주소)
+        val keyInQuery = liveFailures % 2 == 1
+        client = LiveTranslateClient(geminiKey, keyInQuery, object : LiveTranslateClient.Listener {
             override fun onReady() = main.post {
+                if (liveClient === client) {
+                    getSharedPreferences("settings", MODE_PRIVATE).edit().remove("lastLiveError").apply()
+                }
                 if (liveClient === client && !gotAnyResult) {
                     overlay?.setStatus("실시간 통역 연결됨 · 영상을 재생하세요")
                 }
@@ -757,13 +763,18 @@ class CaptionService : Service() {
             return
         }
         liveFailures++
-        if (liveFailures < 3) {
+        lastLiveError = error
+        if (liveFailures < 4) {
             main.postDelayed({ if (!stopped && usingLive) startLive() }, 1500L * liveFailures)
             return
         }
         // 계속 실패 → 기본 모드로 전환
         usingLive = false
         Log.w(TAG, "Live failed, fallback: $error")
+        // 앱 첫 화면에 사유를 보여 주기 위해 저장
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString("lastLiveError", error ?: "알 수 없는 오류")
+            .apply()
         Toast.makeText(
             this,
             "Gemini 실시간 통역에 연결하지 못해 기본 방식으로 전환했어요.\n사유: ${error?.take(120)}",
