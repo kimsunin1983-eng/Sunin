@@ -117,7 +117,7 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
             previous.visibility = View.VISIBLE
         }
         original.text = originalText
-        original.visibility = View.VISIBLE
+        original.visibility = if (originalText.isBlank()) View.GONE else View.VISIBLE
         translated.text = current
         translated.alpha = tone.alpha
     }

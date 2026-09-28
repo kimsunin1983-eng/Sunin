@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var button: Button
     private lateinit var info: TextView
     private lateinit var editKey: EditText
+    private lateinit var checkLive: CheckBox
 
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
 
@@ -78,6 +79,8 @@ class MainActivity : AppCompatActivity() {
         info = findViewById(R.id.textInfo)
         editKey = findViewById(R.id.editKey)
         editKey.setText(prefs.getString("geminiKey", ""))
+        checkLive = findViewById(R.id.checkLive)
+        checkLive.isChecked = prefs.getBoolean("live", true)
 
         spinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first }
@@ -105,7 +108,10 @@ class MainActivity : AppCompatActivity() {
             • 두 번 탭하면 종료 (알림창의 '중지'로도 종료)
 
             참고
-            • 자막은 세 단계로 바뀌어요: 흐린 글씨(말하는 중) → 조금 흐린 글씨(빠른 초벌 번역) → 선명한 글씨(Gemini가 다듬은 번역).
+            • 'Gemini 실시간 통역'을 켜면 Gemini가 소리를 직접 듣고 바로 번역해요. 영상 언어는 자동으로 알아내요.
+              번역 음성까지 함께 내려받아서 데이터를 많이 써요 (1시간에 약 200MB 이상). Wi-Fi에서 쓰세요.
+              연결이 안 되면 자동으로 아래 기본 방식으로 바뀌어요.
+            • 기본 방식에서는 자막이 세 단계로 바뀌어요: 흐린 글씨(말하는 중) → 조금 흐린 글씨(빠른 초벌 번역) → 선명한 글씨(Gemini가 다듬은 번역).
             • Gemini 키가 없으면 Google 번역만 써요. 무료 한도를 넘으면 잠시 초벌 번역만 나와요.
             • 넷플릭스처럼 소리 녹음을 막아 둔 앱은 '폰 소리 직접'이 동작하지 않아요. 이때는 '마이크로 듣기'를 쓰세요.
             • 자막이 안 나오면 '오프라인 음성 인식 우선 사용'을 끄고 다시 시도해 보세요.
@@ -136,6 +142,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("offline", checkOffline.isChecked)
             .putBoolean("mic", radioMic.isChecked)
             .putString("geminiKey", editKey.text.toString().trim())
+            .putBoolean("live", checkLive.isChecked)
             .apply()
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {

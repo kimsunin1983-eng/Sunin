@@ -11,6 +11,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -43,7 +44,9 @@ import org.json.JSONArray
 import kotlin.concurrent.thread
 
 /**
- * 소리 → (폰 내장) 음성 인식 → 초벌 번역(Google, 실패 시 ML Kit) → Gemini 다듬기(키가 있을 때) → 자막
+ * [실시간 통역 모드] 소리 → Gemini Live 번역(원문 언어 자동 감지) → 자막
+ *    연결이 안 되면 자동으로 아래 기본 모드로 전환
+ * [기본 모드] 소리 → (폰 내장) 음성 인식 → 초벌 번역(Google, 실패 시 ML Kit) → Gemini 다듬기(키가 있을 때) → 자막
  *
  * MODE_SYSTEM: 다른 앱에서 재생되는 소리를 AudioPlaybackCapture 로 가져와
  *              파이프로 음성 인식기에 직접 넣음 (Android 13+)
@@ -64,6 +67,7 @@ class CaptionService : Service() {
         private const val CHANNEL_ID = "caption"
         private const val SAMPLE_RATE = 16000
         private const val TAG = "LiveSubtitle"
+        private val SENTENCE_END = setOf('.', '?', '!', '。', '？', '！', '…')
 
         @Volatile
         var isRunning = false
@@ -93,6 +97,8 @@ class CaptionService : Service() {
     private var translatorReady = false
 
     @Volatile private var stopped = false
+    @Volatile private var captureActive = false
+    private var geminiKey = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -105,7 +111,10 @@ class CaptionService : Service() {
 
         langTag = intent.getStringExtra(EXTRA_LANG) ?: "en-US"
         preferOffline = intent.getBooleanExtra(EXTRA_OFFLINE, true)
-        val key = getSharedPreferences("settings", MODE_PRIVATE).getString("geminiKey", "").orEmpty().trim()
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val key = prefs.getString("geminiKey", "").orEmpty().trim()
+        geminiKey = key
+        val wantLive = key.isNotEmpty() && prefs.getBoolean("live", true)
         if (key.isNotEmpty() && !langTag.startsWith("ko")) {
             refiner = GeminiRefiner(key, intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag)
         }
@@ -139,10 +148,21 @@ class CaptionService : Service() {
             }
         }
 
+        if (wantLive) {
+            // 실시간 통역은 소리를 직접 보내야 하므로 마이크 모드에서도 직접 녹음
+            if (!useSystemAudio) startMicCapture()
+            startLive()
+        } else {
+            startClassic()
+        }
+        return START_NOT_STICKY
+    }
+
+    /** 기본 모드: 폰 음성 인식 → Google 초벌 → Gemini 다듬기 */
+    private fun startClassic() {
         setupTranslator()
         createRecognizer()
         startListening()
-        return START_NOT_STICKY
     }
 
     // ───────────────────────── 포그라운드 알림 ─────────────────────────
@@ -217,17 +237,59 @@ class CaptionService : Service() {
                 record.release()
                 return false
             }
-            audioRecord = record
-            record.startRecording()
+            startCaptureLoop(record)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "system capture failed", e)
+            false
+        }
+    }
 
-            captureThread = thread(name = "audio-capture") {
-                val buf = ByteArray(SAMPLE_RATE / 10 * 2) // 100ms
-                // 인식기가 재시작하는 짧은 틈의 소리를 최대 1.5초 보관 → 문장 앞부분이 잘리지 않게
-                val backlogMax = SAMPLE_RATE * 2 * 3 / 2
-                var backlog = ByteArray(0)
-                while (!stopped) {
-                    val n = record.read(buf, 0, buf.size)
-                    if (n <= 0) continue
+    /** 마이크 녹음 (실시간 통역 모드 + 마이크로 듣기일 때) */
+    @SuppressLint("MissingPermission")
+    private fun startMicCapture() {
+        try {
+            val minBuf = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+            )
+            val record = AudioRecord(
+                MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, SAMPLE_RATE * 2)
+            )
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                return
+            }
+            startCaptureLoop(record)
+        } catch (e: Exception) {
+            Log.e(TAG, "mic capture failed", e)
+        }
+    }
+
+    /**
+     * 100ms씩 읽어서
+     *  - 실시간 통역 중이면 Gemini Live 로 전송
+     *  - 아니면 음성 인식기 파이프로 전달
+     */
+    private fun startCaptureLoop(record: AudioRecord) {
+        audioRecord = record
+        captureActive = true
+        record.startRecording()
+        captureThread = thread(name = "audio-capture") {
+            val buf = ByteArray(SAMPLE_RATE / 10 * 2) // 100ms
+            // 인식기가 재시작하는 짧은 틈의 소리를 최대 1.5초 보관 → 문장 앞부분이 잘리지 않게
+            val backlogMax = SAMPLE_RATE * 2 * 3 / 2
+            var backlog = ByteArray(0)
+            while (!stopped && captureActive) {
+                val n = record.read(buf, 0, buf.size)
+                if (n <= 0) continue
+                val live = liveClient
+                if (live != null) {
+                    live.sendAudio(buf, n)
+                    continue
+                }
+                if (!usingLive) {
                     val out = pipeOut
                     if (out == null) {
                         backlog = (backlog + buf.copyOf(n)).takeLast(backlogMax)
@@ -246,11 +308,16 @@ class CaptionService : Service() {
                     }
                 }
             }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "system capture failed", e)
-            false
         }
+    }
+
+    private fun stopCapture() {
+        captureActive = false
+        usingLive = false
+        runCatching { liveClient?.close() }
+        liveClient = null
+        stopCapture()
+        captureThread = null
     }
 
     private fun ByteArray.takeLast(max: Int): ByteArray =
@@ -625,6 +692,110 @@ class CaptionService : Service() {
         }
     }
 
+    // ───────────────────────── Gemini 실시간 통역 ─────────────────────────
+    @Volatile private var liveClient: LiveTranslateClient? = null
+    @Volatile private var usingLive = false
+    private var liveFailures = 0
+    private val liveIn = StringBuilder()
+    private val liveOut = StringBuilder()
+    private val liveSilenceRunnable = Runnable { finalizeLive() }
+
+    private fun startLive() {
+        if (stopped) return
+        usingLive = true
+        if (!gotAnyResult) overlay?.setStatus("Gemini 실시간 통역 연결 중…")
+        lateinit var client: LiveTranslateClient
+        client = LiveTranslateClient(geminiKey, object : LiveTranslateClient.Listener {
+            override fun onReady() = main.post {
+                if (liveClient === client && !gotAnyResult) {
+                    overlay?.setStatus("실시간 통역 연결됨 · 영상을 재생하세요")
+                }
+            }.let { }
+
+            override fun onInputText(delta: String) = main.post {
+                if (liveClient !== client) return@post
+                liveIn.append(delta)
+                renderLive()
+            }.let { }
+
+            override fun onOutputText(delta: String) = main.post {
+                if (liveClient !== client) return@post
+                liveFailures = 0
+                gotAnyResult = true
+                liveOut.append(delta)
+                // 문장이 충분히 길고 끝맺음 부호로 끝나면 한 줄로 확정
+                val t = liveOut.trimEnd()
+                if ((t.length > 40 && t.last() in SENTENCE_END) || t.length > 110) {
+                    finalizeLive()
+                } else {
+                    renderLive()
+                }
+                // 2.5초 동안 번역이 더 안 오면 그 줄을 확정
+                main.removeCallbacks(liveSilenceRunnable)
+                main.postDelayed(liveSilenceRunnable, 2500)
+            }.let { }
+
+            override fun onTurnComplete() = main.post {
+                if (liveClient === client) finalizeLive()
+            }.let { }
+
+            override fun onClosed(error: String?, gotOutput: Boolean) = main.post {
+                onLiveClosed(client, error, gotOutput)
+            }.let { }
+        })
+        liveClient = client
+        client.connect()
+    }
+
+    private fun onLiveClosed(client: LiveTranslateClient, error: String?, gotOutput: Boolean) {
+        if (stopped || liveClient !== client) return
+        liveClient = null
+        finalizeLive()
+        if (gotOutput || error == null || error == "goAway") {
+            // 잘 되다가 끊김(서버 세션 시간 제한 등) → 바로 다시 연결
+            main.postDelayed({ if (!stopped && usingLive) startLive() }, 300)
+            return
+        }
+        liveFailures++
+        if (liveFailures < 3) {
+            main.postDelayed({ if (!stopped && usingLive) startLive() }, 1500L * liveFailures)
+            return
+        }
+        // 계속 실패 → 기본 모드로 전환
+        usingLive = false
+        Log.w(TAG, "Live failed, fallback: $error")
+        Toast.makeText(
+            this,
+            "Gemini 실시간 통역에 연결하지 못해 기본 방식으로 전환했어요.\n사유: ${error?.take(120)}",
+            Toast.LENGTH_LONG
+        ).show()
+        if (!useSystemAudio) stopCapture() // 마이크는 음성 인식기가 직접 사용
+        startClassic()
+    }
+
+    private fun renderLive() {
+        val o = overlay ?: return
+        if (liveIn.isBlank() && liveOut.isBlank()) return
+        o.render(
+            lines.lastOrNull()?.best,
+            liveIn.toString().trim(),
+            liveOut.toString().trim().ifEmpty { "…" },
+            SubtitleOverlay.Tone.DRAFT
+        )
+    }
+
+    private fun finalizeLive() {
+        main.removeCallbacks(liveSilenceRunnable)
+        val out = liveOut.toString().trim()
+        if (out.isNotEmpty()) {
+            lines += Line(liveIn.toString().trim()).apply { refined = out }
+            if (lines.size > 40) lines.removeAt(0)
+        }
+        liveIn.setLength(0)
+        liveOut.setLength(0)
+        if (out.isNotEmpty()) render()
+    }
+
     // ───────────────────────── 정리 ─────────────────────────
     override fun onDestroy() {
         stopped = true
@@ -638,10 +809,10 @@ class CaptionService : Service() {
         runCatching { pipeReadEnd?.close() }
         pipeOut = null
 
-        runCatching { audioRecord?.stop() }
-        runCatching { captureThread?.join(500) }
-        runCatching { audioRecord?.release() }
-        audioRecord = null
+        usingLive = false
+        runCatching { liveClient?.close() }
+        liveClient = null
+        stopCapture()
 
         runCatching { projection?.stop() }
         projection = null

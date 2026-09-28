@@ -85,6 +85,14 @@
             android:text="무료 키 받기: https://aistudio.google.com/apikey"
             android:textSize="13sp" />
 
+        <CheckBox
+            android:id="@+id/checkLive"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:checked="true"
+            android:text="Gemini 실시간 통역 사용 (실험 · 언어 자동 감지)" />
+
         <Button
             android:id="@+id/buttonStart"
             android:layout_width="match_parent"

@@ -13,8 +13,15 @@ Gemini 키는 [aistudio.google.com/apikey](https://aistudio.google.com/apikey)�
 무료 등급에서는 보낸 대사가 Google의 모델 개선에 쓰일 수 있습니다.
 
 ```
-영상 소리 ─▶ 폰 내장 음성 인식 ─▶ Google 번역(→ 한국어) ─▶ 떠 있는 자막 창
+[실시간 통역 모드]  영상 소리 ─▶ Gemini Live 번역 (언어 자동 감지) ─▶ 자막
+[기본 모드]         영상 소리 ─▶ 폰 음성 인식 ─▶ Google 초벌 ─▶ Gemini 다듬기 ─▶ 자막
 ```
+
+## 실시간 통역 모드 (2.0, 실험)
+Gemini API 키를 넣고 "Gemini 실시간 통역 사용"을 켜면, 소리를 `gemini-3.5-live-translate-preview` 에 실시간으로 흘려보내
+Gemini가 직접 듣고 한국어로 번역합니다. 원문 언어는 자동 감지됩니다.
+- 번역 음성도 함께 내려오므로(앱은 자막만 사용) 데이터를 많이 씁니다. Wi-Fi 권장.
+- 연결이 3번 연속 실패하면(무료 등급 미지원, 한도 초과 등) 자동으로 기본 모드로 전환하고 사유를 알림으로 보여 줍니다.
 
 ## 설치
 1. 이 저장소의 **Releases → 최신 빌드 → `LiveSubtitle.apk`** 를 폰에서 눌러 내려받습니다.
