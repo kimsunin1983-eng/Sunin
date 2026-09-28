@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var info: TextView
     private lateinit var editKey: EditText
     private lateinit var radioEngine: android.widget.RadioGroup
+    private lateinit var checkOriginal: CheckBox
 
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
 
@@ -79,6 +80,8 @@ class MainActivity : AppCompatActivity() {
         info = findViewById(R.id.textInfo)
         editKey = findViewById(R.id.editKey)
         editKey.setText(prefs.getString("geminiKey", ""))
+        checkOriginal = findViewById(R.id.checkOriginal)
+        checkOriginal.isChecked = prefs.getBoolean("showOriginal", false)
         radioEngine = findViewById(R.id.radioEngine)
         radioEngine.check(
             when (prefs.getString("engine", "live")) {
@@ -159,6 +162,7 @@ class MainActivity : AppCompatActivity() {
             .putBoolean("mic", radioMic.isChecked)
             .putString("geminiKey", editKey.text.toString().trim())
             .putString("engine", selectedEngine())
+            .putBoolean("showOriginal", checkOriginal.isChecked)
             .apply()
 
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {

@@ -42,13 +42,14 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
         - 앞 대사의 흐름, 말투(반말/존댓말), 인물 사이의 호칭을 일관되게 유지한다.
         - 군말(음, 어, えーと, 那个 등)과 불필요한 반복은 뺀다. 자막답게 짧고 한눈에 읽히게 쓴다.
         - 인명·지명·작품명은 한국에서 통용되는 표기를 쓴다.
+        - 초벌 번역이 주어지면 뜻은 참고하되 어색한 직역투를 자연스러운 한국어로 고친다. 원문 받아쓰기는 문장 경계가 초벌 번역과 조금 어긋날 수 있으니, 초벌 번역이 다루는 내용 범위에 맞춰 다듬는다.
         - '번역할 대사'의 줄 수와 정확히 같은 개수의 문자열을 JSON 배열로만 출력한다. 줄을 합치거나 나누지 않는다. 설명은 쓰지 않는다. 뜻이 없는 줄은 빈 문자열로 둔다.
     """.trimIndent()
 
     /** 성공하면 lines 와 같은 길이의 목록(빈 칸은 null), 실패하면 null */
-    fun refine(context: List<Context>, lines: List<String>): List<String?>? {
+    fun refine(context: List<Context>, lines: List<String>, drafts: List<String?>? = null): List<String?>? {
         if (keyInvalid || System.currentTimeMillis() < cooldownUntil) return null
-        val prompt = buildPrompt(context, lines)
+        val prompt = buildPrompt(context, lines, drafts)
 
         for (model in models.toList()) {
             var attempt = 0
@@ -82,14 +83,23 @@ class GeminiRefiner(private val apiKey: String, private val sourceLanguageName: 
         return null
     }
 
-    private fun buildPrompt(context: List<Context>, lines: List<String>): String = buildString {
+    private fun buildPrompt(context: List<Context>, lines: List<String>, drafts: List<String?>?): String = buildString {
         if (context.isNotEmpty()) {
             append("[앞 대사 — 참고용, 번역하지 말 것]\n")
             context.forEach { append("- ").append(it.original).append("  →  ").append(it.translated).append('\n') }
             append('\n')
         }
         append("[번역할 대사 ${lines.size}줄]\n")
-        lines.forEachIndexed { i, l -> append(i + 1).append(". ").append(l).append('\n') }
+        lines.forEachIndexed { i, l ->
+            append(i + 1).append(". ")
+            val d = drafts?.getOrNull(i)
+            if (d.isNullOrBlank()) {
+                append(l)
+            } else {
+                append("원문: ").append(l.ifBlank { "(받아쓰기 없음)" }).append("  /  초벌 번역: ").append(d)
+            }
+            append('\n')
+        }
     }
 
     private fun post(model: String, prompt: String): Pair<Int, String> {

@@ -15,7 +15,11 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /** 다른 앱 위에 떠 있는 자막 창. 끌어서 이동, 두 번 탭하면 종료. */
-class SubtitleOverlay(private val context: Context, private val onClose: () -> Unit) {
+class SubtitleOverlay(
+    private val context: Context,
+    private val showOriginal: Boolean,
+    private val onClose: () -> Unit,
+) {
 
     private val wm = context.getSystemService(WindowManager::class.java)
     private val density = context.resources.displayMetrics.density
@@ -117,7 +121,7 @@ class SubtitleOverlay(private val context: Context, private val onClose: () -> U
             previous.visibility = View.VISIBLE
         }
         original.text = originalText
-        original.visibility = if (originalText.isBlank()) View.GONE else View.VISIBLE
+        original.visibility = if (!showOriginal || originalText.isBlank()) View.GONE else View.VISIBLE
         translated.text = current
         translated.alpha = tone.alpha
     }

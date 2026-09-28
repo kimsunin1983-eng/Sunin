@@ -101,6 +101,7 @@ class CaptionService : Service() {
     @Volatile private var stopped = false
     @Volatile private var captureActive = false
     private var geminiKey = ""
+    private var showOriginal = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -119,9 +120,12 @@ class CaptionService : Service() {
         val engine = prefs.getString("engine", "live")
         val wantLive = key.isNotEmpty() && engine == "live"
         val wantListen = key.isNotEmpty() && engine == "listen"
-        if (key.isNotEmpty() && !langTag.startsWith("ko")) {
-            refiner = GeminiRefiner(key, intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag)
+        if (key.isNotEmpty() && (wantLive || !langTag.startsWith("ko"))) {
+            // 실시간 통역은 언어를 자동 감지하므로 언어 이름을 특정하지 않음
+            val name = if (wantLive) "외국어" else intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag
+            refiner = GeminiRefiner(key, name)
         }
+        showOriginal = prefs.getBoolean("showOriginal", false)
         useSystemAudio = intent.getStringExtra(EXTRA_MODE) == MODE_SYSTEM &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
 
@@ -135,7 +139,7 @@ class CaptionService : Service() {
         }
         isRunning = true
 
-        overlay = SubtitleOverlay(this) { stopSelf() }.also {
+        overlay = SubtitleOverlay(this, showOriginal) { stopSelf() }.also {
             try {
                 it.show()
             } catch (e: Exception) {
@@ -525,6 +529,7 @@ class CaptionService : Service() {
     private class Line(val original: String) {
         var draft: String? = null   // Google 초벌 번역
         var refined: String? = null // Gemini 다듬은 번역
+        var fromLive = false        // 실시간 통역에서 온 줄
         val best get() = refined ?: draft
     }
 
@@ -659,10 +664,12 @@ class CaptionService : Service() {
             emptyList()
         }
         val originals = batch.map { it.original }
+        // 실시간 통역 줄은 초벌 번역(draft)도 함께 보내서 다듬게 함
+        val drafts = if (batch.any { it.fromLive }) batch.map { it.draft } else null
         refineInFlight = true
         lastRefineAt = SystemClock.elapsedRealtime()
         netExecutor.execute {
-            val result = runCatching { r.refine(context, originals) }.getOrNull()
+            val result = runCatching { r.refine(context, originals, drafts) }.getOrNull()
             main.post {
                 refineInFlight = false
                 if (stopped) return@post
@@ -857,8 +864,13 @@ class CaptionService : Service() {
         main.removeCallbacks(liveSilenceRunnable)
         val out = liveOut.toString().trim()
         if (out.isNotEmpty()) {
-            lines += Line(liveIn.toString().trim()).apply { refined = out }
+            val line = Line(liveIn.toString().trim()).apply {
+                draft = out
+                fromLive = true
+            }
+            lines += line
             if (lines.size > 40) lines.removeAt(0)
+            enqueueRefine(line) // 몇 초 뒤 자연스러운 문장으로 교체
         }
         liveIn.setLength(0)
         liveOut.setLength(0)

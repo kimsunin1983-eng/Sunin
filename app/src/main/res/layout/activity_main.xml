@@ -116,6 +116,12 @@
                 android:text="기본 (폰 음성 인식 + 번역 + Gemini 다듬기)" />
         </RadioGroup>
 
+        <CheckBox
+            android:id="@+id/checkOriginal"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="자막에 원문도 함께 보기" />
+
         <Button
             android:id="@+id/buttonDiagnose"
             style="?android:attr/buttonBarButtonStyle"
