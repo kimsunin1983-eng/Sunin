@@ -116,12 +116,24 @@ class TranslationRegressionTest {
         c.feed(5, true, 1)
         c.begin()
         c.buffer.cancelTurn()
+        c.feed(8, false) // 취소된 말이 끝남
         c.feed(5, true, 2)
         c.feed(8, false)
         c.begin()
         val pcm = c.buffer.finishTurn()!!
         assertFalse(pcm.any { it == 1.toByte() })
         assertTrue(pcm.any { it == 2.toByte() })
+    }
+
+    @Test fun speechContinuingAcrossCancelIsTruncatedAndNeverUsed() {
+        val c = Capture()
+        c.feed(5, true, 1)
+        c.begin()
+        c.buffer.cancelTurn()
+        c.feed(5, true, 2) // 쉬지 않고 이어 말함 → 앞부분이 없는 소리
+        c.feed(8, false)
+        c.begin()
+        assertNull(c.buffer.finishTurn())
     }
 
     @Test fun shortNoiseBeforeSpeechDoesNotBlockCorrection() {
@@ -143,6 +155,29 @@ class TranslationRegressionTest {
     @Test fun namesAndSharedWordsSurviveOnlyAsLastResort() {
         listOf("Marriott", "Taxi", "No", "Clark Marriott").forEach { assertTrue(it, TranslationChecks.sharedWord(it)) }
         listOf("I am sick", "Do not pay", "I love you", "아니요").forEach { assertFalse(it, TranslationChecks.sharedWord(it)) }
+    }
+
+    @Test fun brandNamesDoNotTurnASentenceIntoLatin() {
+        mapOf(
+            "Google Calendar 확인해 주세요" to "ko",
+            "iPhone 있어요?" to "ko",
+            "Marriott 호텔" to "ko",
+            "我想去Starbucks" to "han",
+            "Я люблю YouTube" to "cyr",
+            "ไป Starbucks กัน" to "thai",
+            "スターバックスに行きましょう" to "ja",
+            "Let's meet at Starbucks" to "latin",
+            "Xin chào, tôi là Minh" to "latin",
+        ).forEach { (text, script) -> assertEquals(text, script, Scripts.detect(text)) }
+        assertNull(Scripts.detect("123"))
+        assertNull(Scripts.detect("..."))
+        assertNull(Scripts.detect(""))
+    }
+
+    @Test fun mixedScriptIsRecognised() {
+        assertTrue(Scripts.mixed("How do you say 안녕하세요?"))
+        assertFalse(Scripts.mixed("안녕하세요"))
+        assertFalse(Scripts.mixed("Hello there"))
     }
 
     @Test fun silenceAloneNeverCreatesAnUtterance() {

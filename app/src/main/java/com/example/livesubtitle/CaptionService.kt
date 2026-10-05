@@ -157,9 +157,13 @@ class CaptionService : Service() {
                 it.show()
             } catch (e: Exception) {
                 Log.e(TAG, "overlay failed", e)
+                Toast.makeText(this, "자막 창을 띄우지 못했어요. '다른 앱 위에 표시' 권한을 확인해 주세요.", Toast.LENGTH_LONG).show()
+                stopSelf()
+                return START_NOT_STICKY
             }
         }
         overlay?.setStatus("준비 중…")
+        classicLabel = (intent.getStringExtra(EXTRA_LANG_NAME)?.takeIf { it != "자동 감지" } ?: "영어") + " → 한국어"
 
         autoLanguage = intent.getStringExtra(EXTRA_LANG_NAME) == "자동 감지"
         if (useSystemAudio) {
@@ -187,6 +191,7 @@ class CaptionService : Service() {
 
     /** 기본 모드: 폰 음성 인식 → Google 초벌 → Gemini 다듬기 */
     private fun startClassic() {
+        overlay?.setLabel(classicLabel) // 기본 방식은 고른 언어로만 인식함
         if (autoLanguage) {
             // 기본 방식은 언어를 스스로 알아내지 못함 → 영어로 인식한다는 사실을 숨기지 않음
             overlay?.setLabel("영어 → 한국어")
@@ -310,6 +315,8 @@ class CaptionService : Service() {
      *  - 실시간 통역 중이면 Gemini Live 로 전송
      *  - 아니면 음성 인식기 파이프로 전달
      */
+    private var classicLabel = "영어 → 한국어"
+
     private fun startCaptureLoop(record: AudioRecord) {
         audioRecord = record
         captureActive = true
@@ -321,7 +328,11 @@ class CaptionService : Service() {
             var backlog = ByteArray(0)
             while (!stopped && captureActive) {
                 val n = record.read(buf, 0, buf.size)
-                if (n <= 0) continue
+                if (n < 0) {
+                    main.post { if (!stopped) overlay?.setStatus("소리 입력이 끊겼어요. 자막을 끄고 다시 시작해 주세요.") }
+                    break
+                }
+                if (n == 0) continue
                 val live = liveClient
                 if (live != null) {
                     live.sendAudio(buf, n)
@@ -476,6 +487,16 @@ class CaptionService : Service() {
 
         override fun onError(error: Int) {
             Log.w(TAG, "recognizer error $error")
+            val heardSoFar = partialOriginal
+            if (heardSoFar != null) {
+                val carriedDraft = partialDraft
+                utterance++
+                pendingPartial = null
+                lastPartialSent = ""
+                partialOriginal = null
+                partialDraft = null
+                addLine(heardSoFar, carriedDraft)
+            }
             when (error) {
                 // 말소리가 없었음 → 바로 다시 듣기
                 SpeechRecognizer.ERROR_NO_MATCH,
@@ -584,6 +605,10 @@ class CaptionService : Service() {
 
     private fun render() {
         val o = overlay ?: return
+        if (usingLive && liveOut.isNotBlank()) {
+            renderLive() // 실시간으로 번역 중인 문장이 있으면 그 문장을 계속 보여 줌
+            return
+        }
         val pOrig = partialOriginal
         if (pOrig != null) {
             o.render(recent(lines.size), pOrig, partialDraft ?: "", SubtitleOverlay.Tone.PARTIAL)
@@ -713,9 +738,14 @@ class CaptionService : Service() {
                 refineInFlight = false
                 if (stopped) return@post
                 result?.forEachIndexed { i, t -> if (t != null) batch[i].refined = t }
-                if (r.keyInvalid && !warnedKey) {
-                    warnedKey = true
-                    Toast.makeText(this, "Gemini API 키가 올바르지 않아요. 앱에서 키를 확인해 주세요. (지금은 Google 번역만 사용)", Toast.LENGTH_LONG).show()
+                if (r.keyInvalid) {
+                    refiner = null // 더 시도하지 않음. 이후 줄은 초벌 번역을 그대로 완성으로 표시
+                    if (!warnedKey) {
+                        warnedKey = true
+                        Toast.makeText(this, "Gemini API 키가 올바르지 않아 '완성 번역으로 다듬기'를 껐어요. 앱에서 키를 확인해 주세요.", Toast.LENGTH_LONG).show()
+                    }
+                    render()
+                    return@post
                 }
                 render()
                 scheduleRefine()
@@ -758,6 +788,9 @@ class CaptionService : Service() {
     @Volatile private var liveClient: LiveTranslateClient? = null
     @Volatile private var usingLive = false
     private var liveFailures = 0
+    private var quickCloses = 0
+    private var listenErrors = 0
+    private var liveStartedAt = 0L
     private val liveIn = StringBuilder()
     private val liveOut = StringBuilder()
     private val liveSilenceRunnable = Runnable { finalizeLive() }
@@ -801,10 +834,10 @@ class CaptionService : Service() {
                     finalizeLive()
                 } else {
                     renderLive()
+                    // 2.5초 동안 번역이 더 안 오면 그 줄을 확정
+                    main.removeCallbacks(liveSilenceRunnable)
+                    main.postDelayed(liveSilenceRunnable, 2500)
                 }
-                // 2.5초 동안 번역이 더 안 오면 그 줄을 확정
-                main.removeCallbacks(liveSilenceRunnable)
-                main.postDelayed(liveSilenceRunnable, 2500)
             }.let { }
 
             override fun onTurnComplete() = main.post {
@@ -816,6 +849,7 @@ class CaptionService : Service() {
             }.let { }
         })
         liveClient = client
+        liveStartedAt = SystemClock.elapsedRealtime()
         client.connect()
     }
 
@@ -823,7 +857,9 @@ class CaptionService : Service() {
         if (stopped || liveClient !== client) return
         liveClient = null
         finalizeLive()
-        if (gotOutput || error == null || error == "goAway") {
+        val diedYoung = !gotOutput && error == null && SystemClock.elapsedRealtime() - liveStartedAt < 10_000
+        if (diedYoung) quickCloses++ else if (gotOutput) quickCloses = 0
+        if (quickCloses < 5 && (gotOutput || error == null || error == "goAway")) {
             // 잘 되다가 끊김(서버 세션 시간 제한 등) → 바로 다시 연결
             main.postDelayed({ if (!stopped && usingLive) startLive() }, 300)
             return
@@ -838,7 +874,7 @@ class CaptionService : Service() {
         Log.w(TAG, "Live failed, fallback: $error")
         // 앱 첫 화면에 사유를 보여 주기 위해 저장
         getSharedPreferences("settings", MODE_PRIVATE).edit()
-            .putString("lastLiveError", error ?: "알 수 없는 오류")
+            .putString("lastLiveError", error ?: "연결되자마자 닫히는 일이 반복됨")
             .apply()
         Toast.makeText(
             this,
@@ -864,13 +900,15 @@ class CaptionService : Service() {
                     this@CaptionService.lines += Line(src).apply { refined = ko }
                 }
                 while (this@CaptionService.lines.size > 40) this@CaptionService.lines.removeAt(0)
+                listenErrors = 0
                 render()
             }.let { }
 
             override fun onError(message: String, fatal: Boolean) = main.post {
                 if (!usingListen || stopped) return@post
                 if (!fatal) {
-                    if (!gotAnyResult) overlay?.setStatus(message)
+                    listenErrors++
+                    if (!gotAnyResult || listenErrors >= 3) overlay?.setStatus(message)
                     return@post
                 }
                 // 키 오류 등 → 기본 모드로

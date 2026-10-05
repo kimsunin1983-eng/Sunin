@@ -79,6 +79,8 @@ class MainActivity : AppCompatActivity() {
                     startCaption()
                 } else {
                     toast("소리를 듣기 위해 '마이크' 권한이 필요해요.")
+                    // 여러 번 거절하면 허용 창이 더 뜨지 않음 → 앱 설정 화면으로 안내
+                    if (!shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) openAppSettings()
                 }
             }
         }

@@ -7,6 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 연달아 올리면 앞선 빌드를 취소 (늦게 끝난 옛 빌드가 새 APK 를 덮어쓰지 않게)
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 

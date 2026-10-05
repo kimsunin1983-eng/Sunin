@@ -271,7 +271,7 @@ class ConversationActivity : AppCompatActivity() {
             toast("한쪽은 언어를 정해 주세요. 양쪽 모두 자동 감지로 둘 수는 없어요.")
             return
         }
-        if (pickL.code == pickR.code) {
+        if (pickL.code.substringBefore('-') == pickR.code.substringBefore('-')) {
             toast("왼쪽과 오른쪽 언어를 다르게 골라 주세요.")
             return
         }
@@ -298,6 +298,7 @@ class ConversationActivity : AppCompatActivity() {
 
         session++
         playGen++
+        recentTurns.clear()
         speakerRouteChecked = false
         running = true
         setFacing("")
@@ -360,6 +361,7 @@ class ConversationActivity : AppCompatActivity() {
         runCatching { speakerPlayer?.shutdownNow() }
         speakerPlayer = null
         speakerBusyUntil = 0L
+        trackBusyUntil = 0L
         speechBuffer.cancelTurn()
         runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.release() }
         speakerTrack = null
@@ -405,7 +407,11 @@ class ConversationActivity : AppCompatActivity() {
                 val buf = ByteArray(IN_RATE / 10 * 2) // 100ms
                 while (micActive) {
                     val n = r.read(buf, 0, buf.size)
-                    if (n <= 0 || !running) continue
+                    if (n < 0) {
+                        ui { if (running) stop("마이크가 끊겼어요. 다시 시작해 주세요.") }
+                        break
+                    }
+                    if (n == 0 || !running) continue
                     boost(buf, n)
                     var lv = level(buf, n)
                     // 민감도보다 작은 소리는 무음으로 바꿔 보냄 (말끝이 잘리지 않게 0.4초는 더 열어 둠)
@@ -427,7 +433,7 @@ class ConversationActivity : AppCompatActivity() {
                     utterance?.feed(buf, n, lv)
                     val client = live
                     if (fastMode && client?.isReady == true) {
-                        speechBuffer.feed(buf, n, lv >= maxOf(gateLevel, 0.01f), SystemClock.elapsedRealtime())
+                        speechBuffer.feed(buf, n, lv >= maxOf(gateLevel, 0.03f), SystemClock.elapsedRealtime())
                         client.sendAudio(buf, n)
                     }
                 }
@@ -440,6 +446,8 @@ class ConversationActivity : AppCompatActivity() {
 
     @Volatile private var headphones = true
     @Volatile private var lastPlayAt = 0L
+    /** 이어폰 쪽 재생기(track)에 넣은 소리가 다 나올 것으로 보이는 시각 */
+    @Volatile private var trackBusyUntil = 0L
 
     /** 이어폰이 없어서 번역 소리가 폰 스피커로 나오고 있는 중인지 */
     private fun speakerPlaying(): Boolean {
@@ -447,7 +455,9 @@ class ConversationActivity : AppCompatActivity() {
         if (speakerMode && SystemClock.elapsedRealtime() < speakerBusyUntil + 400) return true
         if (headphones) return false
         if (tts?.isSpeaking == true) return true
-        return SystemClock.elapsedRealtime() - lastPlayAt < 600
+        // 소리는 실제 재생보다 빨리 도착하므로, 도착 시각이 아니라 재생이 끝날 시각까지 쉼
+        val now = SystemClock.elapsedRealtime()
+        return now < trackBusyUntil + 400 || now - lastPlayAt < 600
     }
 
     // ── 주변 소리 민감도 (0~100) ──
@@ -698,6 +708,7 @@ class ConversationActivity : AppCompatActivity() {
      */
     private val turnIdle = Runnable { if (liveTurnOpen) endLiveTurn(confirmed = false) }
     private var heldAudioBytes = 0
+    private var earWaits = 0
 
     /** NONE: 번역이 아닌 출력이라 버림 */
     private enum class Ear { LEFT, RIGHT, BOTH, NONE }
@@ -792,8 +803,10 @@ class ConversationActivity : AppCompatActivity() {
                         val speaker = if (speakerIsA) left else right
                         addBubble(speaker, src, out)
                         if (speakerMode) {
-                            if (!speaker.isLeft) setFacing(out) // 내가 한 말 → 상대가 읽게
-                            else speak(out, right)                      // 상대가 한 말 → 내 이어폰
+                            if (!speaker.isLeft) {
+                                setFacing(out) // 내가 한 말 → 상대가 읽게
+                                facingSeq = -1
+                            } else speak(out, right) // 상대가 한 말 → 내 이어폰
                         } else {
                             speak(out, other(speaker))
                         }
@@ -806,6 +819,7 @@ class ConversationActivity : AppCompatActivity() {
         fixExecutor = CheckExecutor.create() // running 1 + waiting 2, owned by this session
         speechBuffer = LiveSpeechBuffer()
         speakerBusyUntil = 0L
+        trackBusyUntil = 0L
         recentTurns.clear()
         if (speakerMode) {
             // 상대에게 가는 번역은 폰 스피커로 (이어폰이 연결돼 있어도 이 소리만 스피커로 보냄)
@@ -937,7 +951,9 @@ class ConversationActivity : AppCompatActivity() {
                 }
 
                 override fun onTurnComplete() = ui {
-                    if (live === client) endLiveTurn(confirmed = true)
+                    if (live !== client) return@ui
+                    // 안전장치가 이미 닫은 말에 대한 늦은 종료 신호면 받아쓴 글자만 비움
+                    if (liveTurnOpen) endLiveTurn(confirmed = true) else liveIn.setLength(0)
                 }
 
                 override fun onInterrupted() = ui {
@@ -948,6 +964,7 @@ class ConversationActivity : AppCompatActivity() {
                     runCatching { track?.pause(); track?.flush(); track?.play() }
                     runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.play() }
                     speakerBusyUntil = 0L
+                    trackBusyUntil = 0L
                     speechBuffer.cancelTurn()
                     resetLiveTurn()
                 }
@@ -1001,7 +1018,11 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
-    private fun chooseEar(force: Boolean) {
+    /**
+     * force: 기다릴 만큼 기다렸으니 지금 있는 글자로 정함 (1.2초 타이머 또는 말이 끝남)
+     * final: 말이 끝남. 더 올 글자가 없음
+     */
+    private fun chooseEar(force: Boolean, final: Boolean = false) {
         if (ear == Ear.NONE) return
         val text = liveOut.toString()
         // 번역이 아닌 표시 문구면 버림. 오는 중일 수 있으면 조금 더 기다림
@@ -1010,6 +1031,19 @@ class ConversationActivity : AppCompatActivity() {
         if (suspicious) return // timeout may choose an ear, but may never discard a partial sentence
 
         val script = detectScript(text)
+        // 소리만 먼저 오고 글자가 아직 하나도 없으면 양쪽 귀에 틀지 말고 조금 더 기다림 (최대 3초)
+        if (script == null && force && !final && earWaits < 3) {
+            earWaits++
+            main.removeCallbacks(earTimeout)
+            main.postDelayed(earTimeout, 600)
+            return
+        }
+        // 한글·일본어 번역이 "Starbucks" 같은 알파벳 단어로 시작할 수 있음.
+        // 알파벳만 보일 때는 15자 넘게 이어지거나 기다림이 끝난 뒤에야 알파벳 언어로 판단
+        val pair = setOf(left.script, right.script)
+        if (script == "latin" && !force && pair.size == 2 && "latin" in pair &&
+            text.count { it.isLetter() } < 15
+        ) return
         // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
         // 다만 "네", "Yes" 처럼 짧게 끝난 말은 마지막 판단(force) 때 있는 글자로 정함
         val enough = force || text.count { it.isLetter() } >= 4
@@ -1140,7 +1174,7 @@ class ConversationActivity : AppCompatActivity() {
         val e = ear ?: return
         if (e == Ear.BOTH || e == Ear.NONE) return
         val speaker = if (e == Ear.LEFT) right else left
-        if (speaker.lang.code == AUTO) return
+        if (speaker.lang.code == AUTO || other(speaker).lang.code == AUTO) return
 
         // Ambiguous, unfinished, or oversized recordings are never used for corrections.
         if (pcm == null) return
@@ -1189,7 +1223,7 @@ class ConversationActivity : AppCompatActivity() {
         }
         if (LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)) {
             dropTurn(pcm)
-        } else if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
+        } else if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true, final = true)
         if (liveOut.isNotEmpty()) {
             val before = contextPrompt() // 검산에는 이번 말이 들어가기 전의 맥락만 줌
             val turn = rememberTurn()
@@ -1200,6 +1234,10 @@ class ConversationActivity : AppCompatActivity() {
             val t = track
             val silence = ByteArray(OUT_RATE * 4)
             runCatching { player?.execute { runCatching { t?.write(silence, 0, silence.size) } } }
+            val st = speakerTrack
+            if (speakerMode && ear != Ear.RIGHT && st != null) {
+                runCatching { speakerPlayer?.execute { runCatching { st.write(silence, 0, silence.size) } } }
+            }
         }
         resetLiveTurn()
     }
@@ -1214,6 +1252,7 @@ class ConversationActivity : AppCompatActivity() {
         liveBubble = null
         liveTurnOpen = false
         heldAudioBytes = 0
+        earWaits = 0
         turnSeq++
         lastLiveOutputAt = 0L
     }
@@ -1302,6 +1341,9 @@ class ConversationActivity : AppCompatActivity() {
         val mono = louder(quiet)
         val now = SystemClock.elapsedRealtime()
         lastPlayAt = now
+        if (!(speakerMode && e == Ear.LEFT)) {
+            trackBusyUntil = maxOf(now, trackBusyUntil) + mono.size / 2 * 1000L / OUT_RATE
+        }
         if (speakerMode) {
             if (e != Ear.RIGHT) { // 상대에게 → 스피커
                 val t = speakerTrack
@@ -1464,27 +1506,7 @@ class ConversationActivity : AppCompatActivity() {
         else -> "latin"
     }
 
-    private fun detectScript(text: String): String? {
-        var ko = 0
-        var kana = 0
-        var han = 0
-        var latin = 0
-        var cyr = 0
-        var thai = 0
-        for (c in text) {
-            when (c) {
-                in '가'..'힣', in 'ㄱ'..'ㆎ', in 'ᄀ'..'ᇿ' -> ko++
-                in '぀'..'ヿ' -> kana++
-                in '一'..'鿿' -> han++
-                in 'Ѐ'..'ӿ' -> cyr++
-                in '฀'..'๿' -> thai++
-                in 'a'..'z', in 'A'..'Z', in 'À'..'ɏ', in 'Ḁ'..'ỿ' -> latin++
-            }
-        }
-        val best = listOf("ko" to ko, "ja" to kana * 3, "han" to han, "cyr" to cyr, "thai" to thai, "latin" to latin)
-            .maxByOrNull { it.second } ?: return null
-        return if (best.second == 0) null else best.first
-    }
+    private fun detectScript(text: String): String? = Scripts.detect(text)
 
     private fun ui(block: () -> Unit) {
         main.post { if (!isFinishing && !isDestroyed) block() }

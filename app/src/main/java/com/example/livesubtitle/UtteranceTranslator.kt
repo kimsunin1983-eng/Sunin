@@ -157,7 +157,11 @@ class UtteranceTranslator(
     // ───────────────────────── 한 문장 처리 ─────────────────────────
     private fun interpret(pcm: ByteArray) {
         // 1) 받아쓰기
-        val heard = transcribe(pcm) ?: return
+        val heard = transcribe(pcm)
+        if (heard == null) {
+            if (!closed && lastRequestFailed) listener.onError("지금 번역 요청이 실패했어요. (연결 또는 사용량 한도) 잠시 뒤 다시 말해 주세요.", fatal = false)
+            return
+        }
         val src = heard.second.trim()
         if (src.isEmpty()) return
 
@@ -166,7 +170,9 @@ class UtteranceTranslator(
         // 2) 누가 말했는지: 글자 종류로 판단, 구분이 안 되는 언어쌍만 모델의 판단을 따름
         val srcScript = Scripts.detect(src)
         if (srcScript == null) {
-            // 숫자·기호만 있는 말(예: "123", "3.5")은 번역할 것이 없으므로 그대로 전달
+            // 숫자만 있는 말(예: "123", "3.5")은 번역할 것이 없으므로 그대로 전달.
+            // "..." 같은 기호뿐이거나 다루지 않는 글자면 버림
+            if (src.none { it.isDigit() } || src.any { it.isLetter() }) return
             val isA = when (heard.first) {
                 "A" -> true
                 "B" -> false
@@ -175,7 +181,13 @@ class UtteranceTranslator(
             listener.onResult(isA, src, src)
             return
         }
+        val labelled = heard.first == "A" || heard.first == "B"
+        val jaHanPair = setOf(scriptA, scriptB) == setOf("ja", "han")
         val speakerIsA = when {
+            // 두 글자가 섞인 문장("How do you say 안녕하세요?")은 글자만으로 단정하지 않고 모델의 판단을 따름
+            scriptA != scriptB && labelled && Scripts.mixed(src) -> heard.first == "A"
+            // 일본어↔중국어에서 한자만 있는 말("大丈夫")은 글자로 구분할 수 없음
+            jaHanPair && srcScript == "han" && labelled -> heard.first == "A"
             scriptA != scriptB && srcScript != null && Scripts.matches(srcScript, scriptA, scriptB) -> true
             scriptA != scriptB && srcScript != null && Scripts.matches(srcScript, scriptB, scriptA) -> false
             heard.first == "A" -> true
@@ -191,10 +203,24 @@ class UtteranceTranslator(
         var out = translateWithGemini(src, from, to)?.takeIf { valid(it, src, toScript, fromScript) }
         if (out == null) {
             Log.i(TAG, "Gemini translation rejected or failed → Google Translate")
-            out = runCatching { translateWithGoogle(src, from.code, to.code) }
+            val google = runCatching { translateWithGoogle(src, from.code, to.code) }
                 .onFailure { Log.w(TAG, "Google translate failed", it) }
                 .getOrNull()
-                ?.takeIf { valid(it, src, toScript, fromScript, lastResort = true) }
+            out = google?.takeIf { valid(it, src, toScript, fromScript) }
+            if (out == null && scriptA == scriptB && !closed) {
+                // 같은 글자를 쓰는 언어쌍(영어↔스페인어·필리핀어)에서 번역이 원문 그대로면,
+                // 모델이 말한 사람의 언어를 반대로 짚었을 수 있음 → 반대 방향으로 번역해 봄
+                val reversed = translateWithGemini(src, to, from)?.takeIf { valid(it, src, fromScript, toScript) }
+                if (closed) return
+                if (reversed != null) {
+                    history.addLast("${to.english}: $src  →  ${from.english}: $reversed")
+                    while (history.size > 6) history.removeFirst()
+                    listener.onResult(!speakerIsA, src, reversed)
+                    return
+                }
+            }
+            // 어느 쪽으로도 안 바뀌는 한두 단어는 이름이거나 두 언어에서 같은 말로 봄
+            if (out == null) out = google?.takeIf { valid(it, src, toScript, fromScript, lastResort = true) }
         }
         if (closed) return
         if (out == null) {
@@ -221,8 +247,11 @@ class UtteranceTranslator(
                 (toScript == fromScript || !src.trim().contains(' '))
         }
         if (toScript != fromScript) {
-            val s = Scripts.detect(out) ?: return false
-            if (!Scripts.matches(s, toScript, fromScript)) return false
+            // 글자가 없는 결과는 숫자일 때만 인정 ("삼십" → "30")
+            val s = Scripts.detect(out) ?: return out.any { it.isDigit() }
+            // 일본어 번역이 한자만으로 된 경우("了解")도 인정
+            val kanjiOnlyJapanese = s == "han" && toScript == "ja"
+            if (!Scripts.matches(s, toScript, fromScript) && !kanjiOnlyJapanese) return false
         }
         return true
     }
@@ -239,7 +268,7 @@ class UtteranceTranslator(
             - "src": exactly what was said, written in the language and script it was spoken in. Do not translate. Do not answer. Do not add anything that was not said.
 
             A loanword or a name inside a sentence does not change the language of the sentence.
-            Only these two languages are spoken. The speaker may have a strong accent, be a non-native speaker, or speak unclearly: never label the speech as a third language, and write the words they most plausibly intended.
+            The two people speak only these two languages. A speaker may have a strong accent, be a non-native speaker, or speak unclearly: do not label accented or unclear A/B speech as another language; write the words they most plausibly intended. Use "NONE" only when the audio is clearly not speech or is clearly some other language (for example a TV in the background).
         """.trimIndent()
         val text = gemini { model ->
             val config = JSONObject()
@@ -338,7 +367,11 @@ class UtteranceTranslator(
         .put("generationConfig", config)
 
     /** 모델을 바꿔 가며 호출해서 응답 글자를 돌려줌. 실패하면 null */
+    /** 직전 Gemini 요청이 연결·한도 문제로 실패했는지 ("말이 없음"과 구분) */
+    @Volatile private var lastRequestFailed = false
+
     private fun gemini(build: (model: String) -> JSONObject): String? {
+        lastRequestFailed = false
         for (model in models.toList()) {
             var attempt = 0
             while (attempt < 2) {
@@ -366,6 +399,7 @@ class UtteranceTranslator(
                 }
             }
         }
+        lastRequestFailed = true
         return null
     }
 
@@ -457,9 +491,29 @@ object Scripts {
                 in 'a'..'z', in 'A'..'Z', in 'À'..'ɏ', in 'Ḁ'..'ỿ' -> latin++
             }
         }
-        val best = listOf("ko" to ko, "ja" to kana * 3, "han" to han, "cyr" to cyr, "thai" to thai, "latin" to latin)
-            .maxByOrNull { it.second } ?: return null
-        return if (best.second == 0) null else best.first
+        // 알파벳 단어는 한 단어가 여러 글자라 "Google Calendar 확인해 주세요" 도 알파벳이 더 많음.
+        // 알파벳이 아닌 글자가 2자 이상(또는 1자인데 알파벳이 3자 이하)이면 그 글자의 언어로 봄
+        val other = listOf("ko" to ko, "ja" to kana * 3, "han" to han, "cyr" to cyr, "thai" to thai)
+            .maxByOrNull { it.second }!!
+        val otherCount = ko + kana + han + cyr + thai
+        return when {
+            otherCount >= 2 || (otherCount == 1 && latin <= 3) -> other.first
+            latin > 0 -> "latin"
+            else -> null
+        }
+    }
+
+    /** 알파벳과 다른 글자가 모두 꽤 섞여 있는지 (글자 종류만으로 말한 사람을 단정하기 어려움) */
+    fun mixed(text: String): Boolean {
+        var latin = 0
+        var other = 0
+        for (c in text) {
+            when (c) {
+                in 'a'..'z', in 'A'..'Z' -> latin++
+                in '가'..'힣', in '぀'..'ヿ', in '一'..'鿿', in 'Ѐ'..'ӿ', in '฀'..'๿' -> other++
+            }
+        }
+        return latin >= 4 && other >= 2
     }
 
     /** 감지한 글자 종류가 target 언어의 것인지 (한자만 있는 일본어 문장은 상대가 중국어가 아닐 때 일본어로 봄) */

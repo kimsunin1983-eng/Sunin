@@ -25,9 +25,17 @@ internal class LiveSpeechBuffer {
     private var selected: Clip? = null
     private var turnOpen = false
     private var ambiguous = false
+    /** 말하는 도중에 취소됨 → 그 말이 끝날 때까지(무음 0.8초)는 모으지 않음. 앞이 잘린 소리로 검산하지 않기 위함 */
+    private var skipUntilSilence = false
+    private var skipSilentBytes = 0
 
     @Synchronized fun feed(pcm: ByteArray, length: Int, speech: Boolean, now: Long) {
         if (length <= 0) return
+        if (skipUntilSilence) {
+            if (speech) skipSilentBytes = 0 else skipSilentBytes += length
+            if (skipSilentBytes >= END_SILENCE_BYTES) skipUntilSilence = false
+            return
+        }
         while (waiting.isNotEmpty() && now - waiting.first.startedAt > MAX_AGE_MS) waiting.removeFirst()
         if (active == null && speech) {
             active = Clip(now).also { clip ->
@@ -96,6 +104,8 @@ internal class LiveSpeechBuffer {
     }
 
     @Synchronized fun cancelTurn() {
+        skipUntilSilence = active != null
+        skipSilentBytes = 0
         active = null
         selected = null
         waiting.clear()
