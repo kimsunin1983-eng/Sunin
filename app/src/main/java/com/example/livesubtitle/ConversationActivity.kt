@@ -198,6 +198,7 @@ class ConversationActivity : AppCompatActivity() {
         loadTalkSettings()
         updateStatus()
         getSystemService(AudioManager::class.java).registerAudioDeviceCallback(deviceCallback, main)
+        volumeControlStream = AudioManager.STREAM_MUSIC // 이 화면에서 음량 버튼은 번역 소리를 조절
     }
 
     /** 이어폰이 빠지거나 연결되면 바로 반영 (빠진 채로 스피커 소리를 다시 번역하지 않도록) */
@@ -1224,12 +1225,33 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     /**
+     * 번역 목소리를 키움. 모델이 주는 소리가 작아서 그대로 틀면 폰 음량을 끝까지 올려도 작게 들림.
+     * 큰 부분은 찢어지지 않게 부드럽게 눌러 줌.
+     */
+    private fun louder(mono: ByteArray): ByteArray {
+        val out = ByteArray(mono.size)
+        var i = 0
+        while (i + 1 < mono.size) {
+            val v = ((mono[i + 1].toInt() shl 8) or (mono[i].toInt() and 0xFF)) / 32768f * OUT_GAIN
+            val a = kotlin.math.abs(v)
+            // 0.6 까지는 그대로, 그 위는 1.0 을 넘지 않게 완만하게
+            val limited = if (a <= 0.6f) v else Math.copySign(0.6f + 0.4f * kotlin.math.tanh((a - 0.6f) / 0.4f), v)
+            val n = (limited * 32767f).toInt().coerceIn(-32768, 32767)
+            out[i] = (n and 0xFF).toByte()
+            out[i + 1] = ((n shr 8) and 0xFF).toByte()
+            i += 2
+        }
+        return out
+    }
+
+    /**
      * 번역 소리 재생.
      * - 이어폰 나눠 끼기: 고른 귀에만
      * - 스피커 방식: 상대(왼쪽)에게 가는 번역은 폰 스피커로, 나(오른쪽)에게 오는 번역은 이어폰 양쪽으로
      */
-    private fun play(mono: ByteArray, e: Ear) {
+    private fun play(quiet: ByteArray, e: Ear) {
         if (e == Ear.NONE) return
+        val mono = louder(quiet)
         val now = SystemClock.elapsedRealtime()
         lastPlayAt = now
         if (speakerMode) {
@@ -1430,6 +1452,8 @@ class ConversationActivity : AppCompatActivity() {
             RegexOption.IGNORE_CASE
         )
         /** 전체가 <...> 또는 [...] */
+        /** 번역 목소리 증폭 배수 */
+        private const val OUT_GAIN = 2.8f
         private val BRACKETED = Regex("^(<[^<>]*>|\\[[^\\[\\]]*\\])[.!]?$")
         /** 전체가 이런 문구 (괄호가 있어도 됨) */
         private val PLACEHOLDER = Regex(
