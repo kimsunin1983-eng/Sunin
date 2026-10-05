@@ -22,6 +22,8 @@ class Transcriber(private val apiKey: String) {
         val wavB64 = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
         val system = "You are a speech-to-text engine. The speaker is speaking $languageEnglish. " +
             "Write exactly what was said, in $languageEnglish, in its normal script. " +
+            "The speaker may have a strong accent, be a non-native speaker, or speak unclearly; " +
+            "write the words they most plausibly intended. " +
             "Do not translate, do not answer, do not add anything. " +
             "If other languages or voices are also audible, ignore them. " +
             "If there is no intelligible $languageEnglish speech, output an empty string."

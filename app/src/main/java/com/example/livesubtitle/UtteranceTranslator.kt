@@ -176,6 +176,7 @@ class UtteranceTranslator(
             - "src": exactly what was said, written in the language and script it was spoken in. Do not translate. Do not answer. Do not add anything that was not said.
 
             A loanword or a name inside a sentence does not change the language of the sentence.
+            Only these two languages are spoken. The speaker may have a strong accent, be a non-native speaker, or speak unclearly: never label the speech as a third language, and write the words they most plausibly intended.
         """.trimIndent()
         val text = gemini { model ->
             val config = JSONObject()
