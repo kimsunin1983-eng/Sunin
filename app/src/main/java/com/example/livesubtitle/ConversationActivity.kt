@@ -363,7 +363,9 @@ class ConversationActivity : AppCompatActivity() {
         }
         // A = 왼쪽 사람의 언어, B = 오른쪽 사람의 언어
         utterance = UtteranceTranslator(
-            apiKey, left.lang.english, right.lang.english,
+            apiKey,
+            UtteranceTranslator.Language(left.lang.english, left.lang.code),
+            UtteranceTranslator.Language(right.lang.english, right.lang.code),
             object : UtteranceTranslator.Listener {
                 override fun onSpeaking(speaking: Boolean) = ui {
                     hearing = speaking
@@ -590,6 +592,12 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun endLiveTurn() {
         if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
+        if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            // 구형 기기는 버퍼가 차야 재생되므로 무음으로 밀어 줌
+            val t = track
+            val silence = ByteArray(OUT_RATE * 4)
+            runCatching { player?.execute { runCatching { t?.write(silence, 0, silence.size) } } }
+        }
         resetLiveTurn()
     }
 
@@ -625,6 +633,12 @@ class ConversationActivity : AppCompatActivity() {
             .setBufferSizeInBytes(maxOf(minBuf, OUT_RATE * 4))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+            .also {
+                // 기본값은 버퍼(약 1초)가 다 차야 재생을 시작해서 짧은 번역은 소리가 안 났음 → 조금만 쌓여도 바로 재생
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    runCatching { it.setStartThresholdInFrames(OUT_RATE / 20) } // 50ms
+                }
+            }
     }
 
     /** mono PCM 을 고른 귀에만(또는 양쪽에) 재생 */
