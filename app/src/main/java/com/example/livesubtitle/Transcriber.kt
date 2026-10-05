@@ -75,6 +75,74 @@ class Transcriber(private val apiKey: String) {
         return null
     }
 
+    /** 검산 결과. src: 실제로 한 말, out: 다시 번역한 문장, same: 실시간 번역과 뜻이 같은지 */
+    class Check(val src: String, val out: String, val same: Boolean)
+
+    /** 검산은 정확도가 먼저라 큰 모델부터 씀 */
+    private val checkModels = java.util.concurrent.CopyOnWriteArrayList(listOf("gemini-flash-latest", "gemini-flash-lite-latest"))
+
+    /**
+     * 실시간 통역이 방금 내놓은 번역을 검산: 같은 소리를 따로 받아쓰고 번역해서 뜻이 같은지 비교.
+     * 실시간 번역문은 받아쓰기에 영향을 주지 않도록 "비교용"으로만 줌.
+     */
+    fun check(pcm: ByteArray, from: String, to: String, liveTranslation: String, context: String): Check? {
+        val wavB64 = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
+        val system = """
+            You check the work of a live interpreter. The audio clip is one utterance spoken in $from.
+            Step 1. Transcribe exactly what was said in $from, in its normal script. The speaker may have a strong accent, be a non-native speaker, or speak unclearly; write the words they most plausibly intended given the conversation. If other voices or languages are audible, ignore them. Do this from the audio alone, before looking at the interpreter's output.
+            Step 2. Translate your transcript into natural spoken $to. Keep numbers, dates, prices, names, negations and conditions exactly. Keep the speaker's politeness level. Do not answer or add anything.
+            Step 3. Compare with what the interpreter said (given by the user). "same" is true if it conveys the same meaning as your translation, even with different wording or word order. "same" is false only if the meaning differs: a different fact, number, name, subject, negation, question vs statement, or a missing or invented part.
+            If there is no intelligible $from speech, use empty strings and same=true.
+            Output JSON only: {"heard": "...", "translation": "...", "same": true}
+        """.trimIndent() + if (context.isBlank()) "" else "\n\n" + context
+        for (model in checkModels.toList()) {
+            var attempt = 0
+            while (attempt < 2) {
+                attempt++
+                val config = JSONObject().put("temperature", 0).put("responseMimeType", "application/json")
+                if (model !in noThinking) config.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                val body = JSONObject()
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+                    .put(
+                        "contents",
+                        JSONArray().put(
+                            JSONObject().put("role", "user").put(
+                                "parts",
+                                JSONArray()
+                                    .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", wavB64)))
+                                    .put(JSONObject().put("text", "The interpreter said in $to: \"${liveTranslation.take(400)}\""))
+                            )
+                        )
+                    )
+                    .put("generationConfig", config)
+                val (code, resp) = post(model, body)
+                when {
+                    code == 200 -> {
+                        val raw = text(resp) ?: return null
+                        return runCatching {
+                            val o = JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
+                            Check(o.optString("heard").trim(), o.optString("translation").trim(), o.optBoolean("same", true))
+                        }.getOrNull()
+                    }
+                    code == 400 && model !in noThinking && !resp.contains("API_KEY", ignoreCase = true) -> {
+                        noThinking += model
+                        continue
+                    }
+                    else -> {
+                        Log.w(TAG, "check $model HTTP $code: ${resp.take(200)}")
+                        // 한도 초과 등으로 안 되면 다음부터는 다른 모델 먼저
+                        if (checkModels.size > 1 && checkModels.first() == model) {
+                            checkModels.remove(model)
+                            checkModels.add(model)
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     private fun post(model: String, body: JSONObject): Pair<Int, String> {
         val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
             .openConnection() as HttpURLConnection

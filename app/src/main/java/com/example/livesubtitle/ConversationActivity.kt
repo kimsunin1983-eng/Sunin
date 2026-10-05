@@ -1139,18 +1139,31 @@ class ConversationActivity : AppCompatActivity() {
         if (pcm.size < 32 * 300) return // 0.3초 미만이면 받아쓸 게 없음
         val worker = transcriber ?: return
         val target = views.first
-        val language = speaker.lang.english
+        val translatedView = views.second
+        val listener = other(speaker)
         val translation = liveOut.toString().trim()
+        val context = contextPrompt()
         val mine = session
         runCatching {
             fixExecutor?.execute {
-                val text = runCatching { worker.transcribe(pcm, language, translation) }.getOrNull()
-                if (!text.isNullOrBlank()) ui {
+                // 검산: 같은 소리를 따로 받아쓰고 번역해, 실시간 번역과 뜻이 다르면 기록을 고침
+                val check = runCatching {
+                    worker.check(pcm, speaker.lang.english, listener.lang.english, translation, context)
+                }.getOrNull() ?: return@execute
+                ui {
                     if (mine != session) return@ui
-                    val script = detectScript(text)
-                    if (script != null && matches(script, speaker)) {
-                        target.text = text
+                    val script = detectScript(check.src)
+                    val heardOk = check.src.isNotBlank() && script != null && matches(script, speaker)
+                    if (heardOk) {
+                        target.text = check.src
                         target.visibility = View.VISIBLE
+                    }
+                    val outScript = detectScript(check.out)
+                    if (heardOk && !check.same && check.out.isNotBlank() &&
+                        outScript != null && matches(outScript, listener)
+                    ) {
+                        translatedView.text = check.out + "  ✎고침"
+                        if (speakerMode && listener.isLeft) setFacing(check.out)
                     }
                 }
             }
