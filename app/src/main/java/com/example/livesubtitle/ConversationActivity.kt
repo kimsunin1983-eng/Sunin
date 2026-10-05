@@ -66,6 +66,7 @@ class ConversationActivity : AppCompatActivity() {
         Lang("인도네시아어", "id", "Indonesian"),
         Lang("러시아어", "ru", "Russian"),
         Lang("필리핀어 (타갈로그)", "fil", "Filipino (Tagalog)"),
+        Lang("자동 감지", AUTO, ""),
     )
 
     /** 이어폰 한쪽을 낀 사람 */
@@ -238,8 +239,18 @@ class ConversationActivity : AppCompatActivity() {
             toast("먼저 설정에서 Gemini API 키를 입력해 주세요.")
             return
         }
-        if (spinnerLeft.selectedItemPosition == spinnerRight.selectedItemPosition) {
+        val pickL = languages[spinnerLeft.selectedItemPosition]
+        val pickR = languages[spinnerRight.selectedItemPosition]
+        if (pickL.code == AUTO && pickR.code == AUTO) {
+            toast("한쪽은 언어를 정해 주세요. 양쪽 모두 자동 감지로 둘 수는 없어요.")
+            return
+        }
+        if (pickL.code == pickR.code) {
             toast("왼쪽과 오른쪽 언어를 다르게 골라 주세요.")
+            return
+        }
+        if ((pickL.code == AUTO || pickR.code == AUTO) && !fastMode) {
+            toast("자동 감지는 '실시간' 방식에서만 돼요.")
             return
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -584,6 +595,26 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     private fun interpreterPrompt(): String {
+        // 한쪽이 자동 감지: 정해진 언어(known)와 "그 밖의 어떤 언어" 사이를 통역
+        val known = when {
+            left.lang.code == AUTO -> right.lang.english
+            right.lang.code == AUTO -> left.lang.english
+            else -> null
+        }
+        if (known != null) return """
+            You are a live interpreter device placed between two people. You are NOT a participant in the conversation.
+            One person speaks $known. The other person speaks a different language that you must detect from their speech.
+
+            - Whenever you hear any language other than $known, say the same thing in $known.
+            - Whenever you hear $known, say the same thing in the other person's language: the non-$known language most recently spoken in this conversation. If the other person has not spoken yet, use English.
+            - Detect the language of each utterance independently. The language can change on every utterance.
+            - Say ONLY the translation, in a natural conversational tone that keeps the speaker's politeness level.
+            - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
+            - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
+            - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - If you hear only silence, noise, or music, say nothing.
+        """.trimIndent()
+
         val a = left.lang.english
         val b = right.lang.english
         return """
@@ -694,7 +725,18 @@ class ConversationActivity : AppCompatActivity() {
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
     private fun chooseEar(force: Boolean) {
         val script = detectScript(liveOut.toString())
+        val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
         val chosen = when {
+            autoSide != null -> {
+                // 정해진 언어 글자로 나온 번역은 그 사람 귀에, 그 밖의 글자는 자동 감지 쪽 귀에
+                val known = other(autoSide)
+                when {
+                    known.script == "latin" -> Ear.BOTH // 알파벳 언어는 다른 알파벳 언어와 글자로 구분 불가
+                    script == null -> if (force) Ear.BOTH else return
+                    script == known.script -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
+                    else -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
+                }
+            }
             left.script == right.script -> Ear.BOTH // 글자로 구분 못 하는 언어쌍은 양쪽에
             script != null && matches(script, left) -> Ear.LEFT
             script != null && matches(script, right) -> Ear.RIGHT
@@ -805,7 +847,11 @@ class ConversationActivity : AppCompatActivity() {
      */
     private fun addBubble(speaker: Side, originalText: String, translatedText: String): Pair<TextView, TextView> {
         val badge = TextView(this).apply {
-            text = if (speaker.lang.code == "fil") "TL" else speaker.lang.code.substringBefore('-').uppercase().take(2)
+            text = when (speaker.lang.code) {
+                "fil" -> "TL"
+                AUTO -> "··"
+                else -> speaker.lang.code.substringBefore('-').uppercase().take(2)
+            }
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(ContextCompat.getColor(context, if (speaker.isLeft) R.color.teal else R.color.purple))
@@ -938,6 +984,7 @@ class ConversationActivity : AppCompatActivity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
     companion object {
+        private const val AUTO = "auto"
         private const val IN_RATE = 16000
         private const val OUT_RATE = 24000
     }
