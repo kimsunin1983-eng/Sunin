@@ -202,6 +202,46 @@
             android:textSize="13sp" />
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="주변 소리 민감도"
+            android:textColor="@color/textDim"
+            android:textSize="13sp" />
+
+        <SeekBar
+            android:id="@+id/seekSensitivity"
+            android:layout_width="0dp"
+            android:layout_height="32dp"
+            android:layout_weight="1"
+            android:max="100"
+            android:progressTint="@color/teal"
+            android:thumbTint="@color/teal" />
+
+        <TextView
+            android:id="@+id/textSensitivity"
+            android:layout_width="34dp"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="60"
+            android:textColor="@color/text"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/textSensitivityHelp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/textFaint"
+        android:textSize="11sp" />
+
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

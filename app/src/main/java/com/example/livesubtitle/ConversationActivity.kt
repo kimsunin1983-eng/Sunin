@@ -24,6 +24,7 @@ import android.widget.ArrayAdapter
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -138,6 +139,29 @@ class ConversationActivity : AppCompatActivity() {
         }
         spinnerLeft.onItemSelectedListener = onPick
         spinnerRight.onItemSelectedListener = onPick
+
+        // 주변 소리 민감도 (통역 중에도 바로 적용)
+        val seek = findViewById<SeekBar>(R.id.seekSensitivity)
+        val seekValue = findViewById<TextView>(R.id.textSensitivity)
+        val seekHelp = findViewById<TextView>(R.id.textSensitivityHelp)
+        fun apply(value: Int) {
+            setSensitivity(value)
+            seekValue.text = value.toString()
+            seekHelp.text = when {
+                value < 35 -> "낮음: 폰 가까이에서 크게 말한 소리만 번역해요. 시끄러운 곳에 맞아요"
+                value < 70 -> "보통: 마주 앉은 거리의 말소리를 번역해요"
+                else -> "높음: 작은 목소리와 먼 소리도 번역해요. 조용한 곳에 맞아요"
+            }
+        }
+        seek.progress = prefs.getInt("talkSensitivity", 60).coerceIn(0, 100)
+        apply(seek.progress)
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) = apply(progress)
+            override fun onStartTrackingTouch(bar: SeekBar?) {}
+            override fun onStopTrackingTouch(bar: SeekBar?) {
+                prefs.edit().putInt("talkSensitivity", seek.progress).apply()
+            }
+        })
 
         fastMode = prefs.getString("talkMode2", "fast") == "fast" // 기본은 실시간
         segSteady.setOnClickListener { setMode(false) }
@@ -310,7 +334,16 @@ class ConversationActivity : AppCompatActivity() {
                     val n = r.read(buf, 0, buf.size)
                     if (n <= 0 || !running) continue
                     boost(buf, n)
-                    val lv = level(buf, n)
+                    var lv = level(buf, n)
+                    // 민감도보다 작은 소리는 무음으로 바꿔 보냄 (말끝이 잘리지 않게 0.4초는 더 열어 둠)
+                    if (lv >= gateLevel) {
+                        gateOpenChunks = 4
+                    } else if (gateOpenChunks > 0) {
+                        gateOpenChunks--
+                    } else {
+                        java.util.Arrays.fill(buf, 0, n, 0.toByte())
+                        lv = 0f
+                    }
                     wave.push(lv)
                     if (lv > 0.1f) {
                         lastSpeechAt = SystemClock.elapsedRealtime()
@@ -338,10 +371,23 @@ class ConversationActivity : AppCompatActivity() {
         return SystemClock.elapsedRealtime() - lastPlayAt < 600
     }
 
+    // ── 주변 소리 민감도 (0~100) ──
+    /** 작은 목소리를 최대 몇 배까지 키울지 (1~6배) */
+    @Volatile private var maxGain = 4f
+    /** 이 크기(0~1)보다 작은 소리는 버림 */
+    @Volatile private var gateLevel = 0.04f
+    private var gateOpenChunks = 0
+
+    private fun setSensitivity(value: Int) {
+        val s = value.coerceIn(0, 100) / 100f
+        maxGain = 1f + 5f * s                 // 0 → 1배, 60 → 4배, 100 → 6배
+        gateLevel = (1f - s) * (1f - s) * 0.25f // 0 → 0.25, 60 → 0.04, 100 → 0
+    }
+
     // 최근 가장 큰 소리 크기 (천천히 줄어듦). 목소리가 작게 들어오면 이 값이 작아져서 더 많이 키움
     private var peakEnvelope = 4000f
 
-    /** 폰에서 떨어져 말해 작게 들어온 목소리를 최대 4배까지 키움 (제자리에서 수정) */
+    /** 폰에서 떨어져 말해 작게 들어온 목소리를 민감도에 따라 최대 maxGain 배까지 키움 (제자리에서 수정) */
     private fun boost(buf: ByteArray, n: Int) {
         var peak = 0
         var i = 0
@@ -352,7 +398,7 @@ class ConversationActivity : AppCompatActivity() {
             i += 2
         }
         peakEnvelope = maxOf(peak.toFloat(), peakEnvelope * 0.97f, 600f)
-        val gain = (12000f / peakEnvelope).coerceIn(1f, 4f)
+        val gain = (12000f / peakEnvelope).coerceIn(1f, maxGain)
         if (gain <= 1.05f) return
         i = 0
         while (i + 1 < n) {
