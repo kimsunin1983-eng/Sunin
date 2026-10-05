@@ -135,12 +135,12 @@ class ConversationActivity : AppCompatActivity() {
         }
         spinnerLeft.adapter = adapter
         spinnerRight.adapter = adapter
-        // 기본: 상대(왼쪽)는 자동 감지, 나(오른쪽)는 한국어. 목록 순서가 바뀌어도 어긋나지 않게 언어 코드로 기억
+        // 기본: 상대(왼쪽)는 영어, 나(오른쪽)는 한국어. 목록 순서가 바뀌어도 어긋나지 않게 언어 코드로 기억
         fun indexOf(code: String?, fallback: String) =
             languages.indexOfFirst { it.code == code }.takeIf { it >= 0 }
                 ?: languages.indexOfFirst { it.code == fallback }
-        spinnerLeft.setSelection(indexOf(prefs.getString("talkLeftCode", AUTO), AUTO))
-        spinnerRight.setSelection(indexOf(prefs.getString("talkRightCode", "ko"), "ko"))
+        spinnerLeft.setSelection(indexOf(prefs.getString("talkLeftLang", "en"), "en"))
+        spinnerRight.setSelection(indexOf(prefs.getString("talkRightLang", "ko"), "ko"))
         val onPick = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = updateCards()
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -271,8 +271,8 @@ class ConversationActivity : AppCompatActivity() {
             return
         }
         prefs.edit()
-            .putString("talkLeftCode", languages[spinnerLeft.selectedItemPosition].code)
-            .putString("talkRightCode", languages[spinnerRight.selectedItemPosition].code)
+            .putString("talkLeftLang", languages[spinnerLeft.selectedItemPosition].code)
+            .putString("talkRightLang", languages[spinnerRight.selectedItemPosition].code)
             .apply()
         left.lang = languages[spinnerLeft.selectedItemPosition]
         right.lang = languages[spinnerRight.selectedItemPosition]
