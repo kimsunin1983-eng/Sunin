@@ -313,6 +313,9 @@ class ConversationActivity : AppCompatActivity() {
         player = null
         runCatching { track?.pause(); track?.flush(); track?.release() }
         track = null
+        runCatching { fixExecutor?.shutdownNow() }
+        fixExecutor = null
+        transcriber = null
         runCatching { speakerPlayer?.shutdownNow() }
         speakerPlayer = null
         runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.release() }
@@ -379,6 +382,12 @@ class ConversationActivity : AppCompatActivity() {
                     // 이어폰 없이 폰 스피커로 번역이 나오는 동안에는 그 소리를 다시 듣지 않도록 쉼
                     if (speakerPlaying()) continue
                     utterance?.feed(buf, n, lv)
+                    if (fastMode) {
+                        synchronized(talkLog) {
+                            talkLog.addLast(SystemClock.elapsedRealtime() to buf.copyOf(n))
+                            while (talkLog.size > 200) talkLog.removeFirst() // 최근 20초
+                        }
+                    }
                     live?.sendAudio(buf, n)
                 }
             }
@@ -702,6 +711,11 @@ class ConversationActivity : AppCompatActivity() {
         liveVariant = prefs.getInt(variantKey(), 0).coerceIn(0, liveVariants.lastIndex)
         track = newTrack().also { it.play() }
         player = Executors.newSingleThreadExecutor()
+        transcriber = Transcriber(apiKey)
+        fixExecutor = Executors.newSingleThreadExecutor()
+        synchronized(talkLog) { talkLog.clear() }
+        turnFirstOutputAt = 0L
+        prevFirstOutputAt = 0L
         if (speakerMode) {
             // 상대에게 가는 번역은 폰 스피커로 (이어폰이 연결돼 있어도 이 소리만 스피커로 보냄)
             speakerTrack = newTrack().also { t ->
@@ -861,6 +875,7 @@ class ConversationActivity : AppCompatActivity() {
         val active = liveOut.isNotEmpty() || heldAudio.isNotEmpty() || ear != null
         if (active && now - lastLiveOutputAt > 1500) endLiveTurn()
         if (ear == null && heldAudio.isEmpty() && liveOut.isEmpty()) {
+            turnFirstOutputAt = now // 이번 번역이 나오기 시작한 시각 = 그 말이 끝난 직후
             main.removeCallbacks(earTimeout)
             main.postDelayed(earTimeout, 1200) // 글자가 끝내 안 오면 양쪽 귀에 틂
         }
@@ -909,14 +924,68 @@ class ConversationActivity : AppCompatActivity() {
         val views = liveBubble ?: addBubble(speaker, "", "").also { liveBubble = it }
         views.second.text = text
         if (speakerMode && e != Ear.RIGHT) textFacing.text = text // 상대가 읽도록 뒤집어 보여 주는 글자
+        // 자동 받아쓰기가 말한 사람의 언어와 다른 글자로 나오면(언어를 잘못 짚은 것) 보여 주지 않음
         val original = liveIn.toString().trim()
         views.first.text = original
-        views.first.visibility = if (original.isBlank()) View.GONE else View.VISIBLE
+        views.first.visibility = if (originalLooksRight(original, speaker, e)) View.VISIBLE else View.GONE
         scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    /** 받아쓴 원문이 말한 사람의 언어 글자로 되어 있는지 */
+    private fun originalLooksRight(original: String, speaker: Side, e: Ear): Boolean {
+        if (original.isBlank()) return false
+        if (e == Ear.BOTH || speaker.lang.code == AUTO) return true // 판단할 근거가 없으면 그대로 둠
+        val script = detectScript(original) ?: return false
+        return matches(script, speaker)
+    }
+
+    // ── 원문 바로잡기: 자동 받아쓰기가 틀렸으면 그 말의 소리를 언어를 알려 주고 다시 받아씀 ──
+    private val talkLog = java.util.ArrayDeque<Pair<Long, ByteArray>>()
+    private var turnFirstOutputAt = 0L
+    private var prevFirstOutputAt = 0L
+    private var transcriber: Transcriber? = null
+    private var fixExecutor: ExecutorService? = null
+
+    private fun fixOriginalIfWrong() {
+        val views = liveBubble ?: return
+        val e = ear ?: return
+        if (e == Ear.BOTH) return
+        val speaker = if (e == Ear.LEFT) right else left
+        if (speaker.lang.code == AUTO) return
+        if (originalLooksRight(liveIn.toString().trim(), speaker, e)) return
+
+        // 이 말의 소리 = 직전 번역이 나오기 시작한 뒤부터 이번 번역이 나오기 시작할 때까지 (최대 15초)
+        val end = turnFirstOutputAt
+        val start = maxOf(prevFirstOutputAt, end - 15_000)
+        val pcm = synchronized(talkLog) {
+            val out = java.io.ByteArrayOutputStream()
+            talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
+            out.toByteArray()
+        }
+        if (pcm.size < 32 * 300) return // 0.3초 미만이면 받아쓸 게 없음
+        val worker = transcriber ?: return
+        val target = views.first
+        val language = speaker.lang.english
+        runCatching {
+            fixExecutor?.execute {
+                val text = runCatching { worker.transcribe(pcm, language) }.getOrNull()
+                if (!text.isNullOrBlank()) ui {
+                    val script = detectScript(text)
+                    if (script != null && matches(script, speaker)) {
+                        target.text = text
+                        target.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
     }
 
     private fun endLiveTurn() {
         if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
+        if (liveOut.isNotEmpty()) {
+            fixOriginalIfWrong()
+            prevFirstOutputAt = turnFirstOutputAt
+        }
         if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             // 구형 기기는 버퍼가 차야 재생되므로 무음으로 밀어 줌
             val t = track
