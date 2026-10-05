@@ -106,6 +106,11 @@ class CaptionService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        overlay?.onScreenChanged() // 세로 ↔ 가로 전환
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null || intent.action == ACTION_STOP) {
             stopSelf()
@@ -330,15 +335,13 @@ class CaptionService : Service() {
         }
     }
 
+    /** 녹음만 멈춤 (번역 연결은 건드리지 않음) */
     private fun stopCapture() {
         captureActive = false
-        usingLive = false
-        usingListen = false
-        runCatching { liveClient?.close() }
-        liveClient = null
-        runCatching { audioTranslator?.close() }
-        audioTranslator = null
-        stopCapture()
+        runCatching { audioRecord?.stop() }
+        runCatching { captureThread?.join(500) }
+        runCatching { audioRecord?.release() }
+        audioRecord = null
         captureThread = null
     }
 
@@ -414,7 +417,7 @@ class CaptionService : Service() {
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
-            if (!gotAnyResult && translatorReadyOrNotNeeded()) {
+            if (!gotAnyResult) {
                 overlay?.setStatus("듣는 중… 영상을 재생하세요")
             }
         }
@@ -512,8 +515,6 @@ class CaptionService : Service() {
 
     private fun sourceLanguage(): String? =
         TranslateLanguage.fromLanguageTag(langTag.substringBefore('-').let { if (it == "fil") "tl" else it })
-
-    private fun translatorReadyOrNotNeeded() = true
 
     private fun setupTranslator() {
         val src = sourceLanguage()
@@ -729,7 +730,6 @@ class CaptionService : Service() {
     @Volatile private var liveClient: LiveTranslateClient? = null
     @Volatile private var usingLive = false
     private var liveFailures = 0
-    private var lastLiveError: String? = null
     private val liveIn = StringBuilder()
     private val liveOut = StringBuilder()
     private val liveSilenceRunnable = Runnable { finalizeLive() }
@@ -801,7 +801,6 @@ class CaptionService : Service() {
             return
         }
         liveFailures++
-        lastLiveError = error
         if (liveFailures < 4) {
             main.postDelayed({ if (!stopped && usingLive) startLive() }, 1500L * liveFailures)
             return
@@ -905,8 +904,11 @@ class CaptionService : Service() {
         pipeOut = null
 
         usingLive = false
+        usingListen = false
         runCatching { liveClient?.close() }
         liveClient = null
+        runCatching { audioTranslator?.close() }
+        audioTranslator = null
         stopCapture()
 
         runCatching { projection?.stop() }

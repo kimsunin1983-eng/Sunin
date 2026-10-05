@@ -122,8 +122,12 @@ class SubtitleOverlay(
         addView(hint)
     }
 
+    /** 화면 너비의 94%, 가로 화면에서는 너무 넓어지지 않게 최대 640dp */
+    private fun overlayWidth() =
+        minOf((context.resources.displayMetrics.widthPixels * 0.94).toInt(), dp(640))
+
     private val params = WindowManager.LayoutParams(
-        (context.resources.displayMetrics.widthPixels * 0.94).toInt(),
+        overlayWidth(),
         WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -198,6 +202,17 @@ class SubtitleOverlay(
         current.text = currentText
         current.alpha = tone.alpha
         stateView.text = tone.label
+    }
+
+    /** 화면 방향이 바뀌면 너비를 다시 맞추고, 화면 밖으로 나가지 않게 가운데 아래로 되돌림 */
+    fun onScreenChanged() {
+        if (!attached) return
+        root.post {
+            params.width = overlayWidth()
+            params.x = 0
+            params.y = dp(60)
+            runCatching { wm.updateViewLayout(root, params) }
+        }
     }
 
     fun remove() {

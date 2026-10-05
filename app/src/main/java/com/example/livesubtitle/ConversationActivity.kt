@@ -377,12 +377,12 @@ class ConversationActivity : AppCompatActivity() {
                         lv = 0f
                     }
                     wave.push(lv)
+                    // 폰 스피커로 번역이 나오는 동안에는 그 소리를 다시 듣지 않도록 쉼
+                    if (speakerPlaying()) continue
                     if (lv > 0.1f) {
                         lastSpeechAt = SystemClock.elapsedRealtime()
                         unansweredSpeechMs += 100
                     }
-                    // 이어폰 없이 폰 스피커로 번역이 나오는 동안에는 그 소리를 다시 듣지 않도록 쉼
-                    if (speakerPlaying()) continue
                     utterance?.feed(buf, n, lv)
                     if (fastMode) {
                         synchronized(talkLog) {
@@ -884,6 +884,8 @@ class ConversationActivity : AppCompatActivity() {
                     // 모델이 하던 말을 끊음 → 재생 대기 중인 소리를 비움
                     heldAudio.clear()
                     runCatching { track?.pause(); track?.flush(); track?.play() }
+                    runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.play() }
+                    speakerBusyUntil = 0L
                 }
 
                 override fun onClosed(error: String?, gotOutput: Boolean) = ui {
@@ -894,13 +896,15 @@ class ConversationActivity : AppCompatActivity() {
                     if (gotOutput || error == null || error == "goAway") {
                         main.postDelayed({ connectLive() }, 300) // 세션 시간 제한 등 → 다시 연결
                     } else {
-                        // 연결 실패 → 다른 모델/설정 조합으로
                         liveFailures++
-                        if (liveFailures < liveVariants.size) {
-                            liveVariant = (liveVariant + 1) % liveVariants.size
-                            main.postDelayed({ connectLive() }, 500)
+                        // 서버가 설정·모델을 거절한 경우에만 다른 조합으로 넘어감.
+                        // 네트워크 끊김 같은 일시 오류에 조합을 바꾸면 잘 되던 설정을 잃어버림
+                        val rejected = CONFIG_ERROR.containsMatchIn(error.orEmpty())
+                        if (liveFailures < liveVariants.size + 3) {
+                            if (rejected) liveVariant = (liveVariant + 1) % liveVariants.size
+                            main.postDelayed({ connectLive() }, if (rejected) 500L else 1500L)
                         } else {
-                            stop("실시간 방식에 연결하지 못했어요. '안정' 방식을 써 보세요.\n사유: ${error?.take(160)}")
+                            stop("실시간 방식에 연결하지 못했어요. '문장 단위' 방식을 써 보세요.\n사유: ${error?.take(160)}")
                         }
                     }
                     if (running) updateStatus()
@@ -1345,6 +1349,11 @@ class ConversationActivity : AppCompatActivity() {
 
     companion object {
         private const val AUTO = "auto"
+        /** 서버가 설정값이나 모델을 받아들이지 않았다는 오류 */
+        private val CONFIG_ERROR = Regex(
+            "1007|invalid|unknown name|cannot find field|not found|not supported|unsupported|unimplemented",
+            RegexOption.IGNORE_CASE
+        )
         private val PLACEHOLDER = Regex("^\\(?(no speech|no audio|silence|inaudible|unintelligible|noise|music|background)")
 
         /** (화면 이름, 모델에 알려 줄 설명) */
