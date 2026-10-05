@@ -681,8 +681,9 @@ class ConversationActivity : AppCompatActivity() {
                     misses++
                     if (misses >= 2) renewLive("번역이 멈춘 것 같아 다시 연결했어요")
                 }
-                // 연결이 8분 넘었으면 조용한 틈에 미리 새로 맺음 (서버 시간 제한·누적 대화로 인한 느려짐 예방)
-                else if (now - liveConnectedAt > 8 * 60_000 && quietFor > 3000 && idleOutput) {
+                // 서버가 연결을 15분에 끊으므로, 13분이 넘으면 조용한 틈에 미리 새로 맺음.
+                // 앞 대화는 recentTurns 로 새 연결에 넘겨주므로 맥락이 이어짐
+                else if (now - liveConnectedAt > 13 * 60_000 && quietFor > 3000 && idleOutput) {
                     renewLive(null)
                 }
             }
@@ -714,6 +715,7 @@ class ConversationActivity : AppCompatActivity() {
         transcriber = Transcriber(apiKey)
         fixExecutor = Executors.newSingleThreadExecutor()
         synchronized(talkLog) { talkLog.clear() }
+        recentTurns.clear()
         turnFirstOutputAt = 0L
         prevFirstOutputAt = 0L
         if (speakerMode) {
@@ -745,6 +747,11 @@ class ConversationActivity : AppCompatActivity() {
         if (notes.isNotBlank()) {
             append("- Names and terms that may come up; keep them accurate and do not translate proper names: ")
                 .append(notes.replace('\n', ' ').take(300)).append('\n')
+        }
+        if (recentTurns.isNotEmpty()) {
+            append("- The conversation so far (oldest first). Use it only to understand what comes next; ")
+            append("do not repeat, translate again, or respond to these lines:\n")
+            recentTurns.forEach { append("    ").append(it.take(200)).append('\n') }
         }
         append("This context only guides word choice. It never changes the rule: translate, never answer.")
     }
@@ -950,6 +957,22 @@ class ConversationActivity : AppCompatActivity() {
     private var transcriber: Transcriber? = null
     private var fixExecutor: ExecutorService? = null
 
+    /** 최근 대화 (말한 언어 → 번역). 연결을 새로 맺을 때 넘겨줘서 맥락이 끊기지 않게 함 */
+    private val recentTurns = java.util.ArrayDeque<String>()
+
+    private fun rememberTurn() {
+        val e = ear ?: return
+        val out = liveOut.toString().trim()
+        if (out.isEmpty() || e == Ear.BOTH) return
+        val speaker = if (e == Ear.LEFT) right else left
+        val listener = other(speaker)
+        val original = liveIn.toString().trim().takeIf { originalLooksRight(it, speaker, e) }
+        val from = speaker.lang.english.ifBlank { "other language" }
+        val to = listener.lang.english.ifBlank { "other language" }
+        recentTurns.addLast(if (original != null) "[$from] $original  →  [$to] $out" else "[$from → $to] $out")
+        while (recentTurns.size > 10) recentTurns.removeFirst()
+    }
+
     private fun fixOriginalIfWrong() {
         val views = liveBubble ?: return
         val e = ear ?: return
@@ -987,6 +1010,7 @@ class ConversationActivity : AppCompatActivity() {
     private fun endLiveTurn() {
         if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
         if (liveOut.isNotEmpty()) {
+            rememberTurn()
             fixOriginalIfWrong()
             prevFirstOutputAt = turnFirstOutputAt
         }

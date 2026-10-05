@@ -214,8 +214,9 @@ class LiveTranslateClient(
                             "automaticActivityDetection",
                             JSONObject()
                                 .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH") // 작은 목소리도 말의 시작으로
-                                .put("prefixPaddingMs", 200)
-                                .put("silenceDurationMs", 500) // 0.5초 조용하면 말이 끝난 것으로 → 번역을 빨리 시작
+                                .put("prefixPaddingMs", 300) // 말의 첫머리가 잘리지 않게 앞부분을 넉넉히
+                                // 0.65초 조용하면 말이 끝난 것으로. 더 짧으면 말을 고르며 천천히 하는 사람의 문장이 중간에 끊김
+                                .put("silenceDurationMs", 650)
                         )
                 )
             }
