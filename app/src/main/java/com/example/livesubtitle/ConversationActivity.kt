@@ -471,7 +471,7 @@ class ConversationActivity : AppCompatActivity() {
     private var notes = ""
 
     /** 목소리 설정이 바뀌면 통하는 조합도 달라질 수 있어 따로 기억 */
-    private fun variantKey() = if (wantAffective) "talkLiveVariant3a" else "talkLiveVariant3"
+    private fun variantKey() = if (wantAffective) "talkLiveVariant4a" else "talkLiveVariant4"
 
     private fun loadTalkSettings() {
         speakerMode = prefs.getBoolean("talkSpeaker", false)
@@ -647,17 +647,26 @@ class ConversationActivity : AppCompatActivity() {
     private enum class Ear { LEFT, RIGHT, BOTH }
 
     /** 시도할 연결 설정 조합. 서버가 거절하면 다음 것으로, 성공한 것을 기억해 다음에 먼저 씀 */
-    private data class Variant(val model: String, val vad: Boolean, val affective: Boolean)
+    private data class Variant(
+        val model: String,
+        val vad: Boolean,
+        val affective: Boolean,
+        /** 낮은 온도: 들은 대로만 옮기고 덜 지어내게 함 */
+        val lowTemp: Boolean,
+    )
 
     private val liveVariants = listOf(
-        Variant("gemini-3.8-live", vad = true, affective = true),
-        Variant("gemini-3.8-live", vad = true, affective = false),
-        Variant("gemini-3.8-live", vad = false, affective = false),
-        Variant("gemini-3.1-flash-live-preview", vad = true, affective = false),
-        Variant("gemini-3.1-flash-live-preview", vad = false, affective = false),
-        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = true),
-        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = false),
-        Variant("gemini-2.5-flash-native-audio-latest", vad = false, affective = false),
+        Variant("gemini-3.8-live", vad = true, affective = true, lowTemp = true),
+        Variant("gemini-3.8-live", vad = true, affective = true, lowTemp = false),
+        Variant("gemini-3.8-live", vad = true, affective = false, lowTemp = true),
+        Variant("gemini-3.8-live", vad = true, affective = false, lowTemp = false),
+        Variant("gemini-3.8-live", vad = false, affective = false, lowTemp = false),
+        Variant("gemini-3.1-flash-live-preview", vad = true, affective = false, lowTemp = true),
+        Variant("gemini-3.1-flash-live-preview", vad = true, affective = false, lowTemp = false),
+        Variant("gemini-3.1-flash-live-preview", vad = false, affective = false, lowTemp = false),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = true, lowTemp = true),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = false, lowTemp = false),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = false, affective = false, lowTemp = false),
     )
     private var liveVariant = 0
 
@@ -749,8 +758,8 @@ class ConversationActivity : AppCompatActivity() {
                 .append(notes.replace('\n', ' ').take(300)).append('\n')
         }
         if (recentTurns.isNotEmpty()) {
-            append("- The conversation so far (oldest first). Use it only to understand what comes next; ")
-            append("do not repeat, translate again, or respond to these lines:\n")
+            append("- The conversation so far (oldest first). It is background only, for names and topic. ")
+            append("Do not repeat it, translate it again, respond to it, or use it to guess what will be said next:\n")
             recentTurns.forEach { append("    ").append(it.take(200)).append('\n') }
         }
         append("This context only guides word choice. It never changes the rule: translate, never answer.")
@@ -772,8 +781,9 @@ class ConversationActivity : AppCompatActivity() {
             - Detect the language of each utterance independently. The language can change on every utterance.
             - Say ONLY the translation, in a natural conversational tone that keeps the speaker's politeness level.
             - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
+            - Translate ONLY the words spoken in the current utterance. After a question, the next utterance can be anything; it is often NOT an answer to that question. Never output a likely reply, never continue the conversation yourself, never fill in what you expect to hear.
             - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
-            - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - If part of an utterance is unclear, translate only the part you clearly heard. If you could not make out the words at all, say nothing. A wrong translation is worse than silence: never invent content.
             - If you hear only silence, noise, or music, say nothing.
         """.trimIndent()
 
@@ -787,13 +797,14 @@ class ConversationActivity : AppCompatActivity() {
             - Whenever you hear $b, say the same thing in $a.
             - ONLY $a and $b are spoken in this conversation. Every utterance is one of these two. Never interpret speech as any third language, however unusual the pronunciation sounds.
             - Detect which of the two it is for each utterance independently. The language can change on every utterance.
-            - The speakers may have strong regional or foreign accents, may be non-native speakers, may mumble, speak fast, hesitate, restart sentences, or use dialect and slang. Do not expect textbook pronunciation. Work out what they most plausibly meant from the sounds, the situation, and the previous turns, and translate that intended meaning.
-            - If a word could be heard in more than one way, choose the reading that makes sense in this conversation.
+            - The speakers may have strong regional or foreign accents, may be non-native speakers, may mumble, speak fast, hesitate, restart sentences, or use dialect and slang. Do not expect textbook pronunciation. Listen carefully and work out the words they actually said.
+            - Earlier turns may be used ONLY to choose between words that sound alike. They must never be used to predict what the speaker "probably" said.
             - Keep personal names and place names as heard; do not translate them.
             - Say ONLY the translation, in a natural conversational tone that keeps the speaker's politeness level.
             - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
+            - Translate ONLY the words spoken in the current utterance. After a question, the next utterance can be anything; it is often NOT an answer to that question. Never output a likely reply, never continue the conversation yourself, never fill in what you expect to hear.
             - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
-            - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - If part of an utterance is unclear, translate only the part you clearly heard. If you could not make out the words at all, say nothing. A wrong translation is worse than silence: never invent content.
             - If you hear only silence, noise, or music, say nothing.
         """.trimIndent()
     }
@@ -873,6 +884,7 @@ class ConversationActivity : AppCompatActivity() {
             noInterruption = variant.vad,
             voiceName = voice.ifBlank { null },
             affectiveDialog = variant.affective,
+            temperature = if (variant.lowTemp) 0.2 else null,
         )
         live = client
         client.connect()
