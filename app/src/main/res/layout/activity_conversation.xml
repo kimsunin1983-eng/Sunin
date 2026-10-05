@@ -50,6 +50,7 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/rowLanguages"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
@@ -195,6 +196,7 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/rowMode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
@@ -218,6 +220,7 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/rowSensitivity"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"

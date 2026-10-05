@@ -300,7 +300,8 @@ class ConversationActivity : AppCompatActivity() {
         playGen++
         speakerRouteChecked = false
         running = true
-        textFacing.text = ""
+        setFacing("")
+        compact(true)
         if (fastMode) startFast() else startSteady()
         if (!startMic()) {
             stop("마이크를 열지 못했어요.")
@@ -313,8 +314,22 @@ class ConversationActivity : AppCompatActivity() {
         updateStatus()
     }
 
+    /** 상대가 읽을 뒤집힌 큰 글자. 보여 줄 말이 있을 때만 자리를 차지함 */
+    private fun setFacing(text: String) {
+        textFacing.text = text
+        textFacing.visibility = if (speakerMode && text.isNotBlank()) View.VISIBLE else View.GONE
+    }
+
+    /** 통역 중에는 설정 줄들을 접어 대화 기록을 크게 보여 줌 */
+    private fun compact(on: Boolean) {
+        val v = if (on) View.GONE else View.VISIBLE
+        intArrayOf(R.id.rowLanguages, R.id.rowMode, R.id.rowSensitivity, R.id.textSensitivityHelp, R.id.rowTalkSettings)
+            .forEach { findViewById<View>(it).visibility = v }
+    }
+
     private fun stop(message: String) {
         running = false
+        compact(false)
         session++
         playGen++
         micActive = false
@@ -506,8 +521,7 @@ class ConversationActivity : AppCompatActivity() {
         situation = prefs.getInt("talkSituation", 0)
         polite = prefs.getBoolean("talkPolite", true)
         notes = prefs.getString("talkNotes", "").orEmpty()
-        textFacing.visibility = if (speakerMode) View.VISIBLE else View.GONE
-        textFacing.text = ""
+        setFacing("")
         findViewById<TextView>(R.id.textTalkSummary).text = listOf(
             if (speakerMode) "상대 스피커" else "이어폰 나눠 끼기",
             SITUATIONS[situation.coerceIn(0, SITUATIONS.lastIndex)].first,
@@ -765,7 +779,7 @@ class ConversationActivity : AppCompatActivity() {
                         val speaker = if (speakerIsA) left else right
                         addBubble(speaker, src, out)
                         if (speakerMode) {
-                            if (!speaker.isLeft) textFacing.text = out // 내가 한 말 → 상대가 읽게
+                            if (!speaker.isLeft) setFacing(out) // 내가 한 말 → 상대가 읽게
                             else speak(out, right)                      // 상대가 한 말 → 내 이어폰
                         } else {
                             speak(out, other(speaker))
@@ -1021,7 +1035,7 @@ class ConversationActivity : AppCompatActivity() {
         val speaker = if (e == Ear.LEFT) right else left
         val views = liveBubble ?: addBubble(speaker, "", "").also { liveBubble = it }
         views.second.text = text
-        if (speakerMode && e != Ear.RIGHT) textFacing.text = text // 상대가 읽도록 뒤집어 보여 주는 글자
+        if (speakerMode && e != Ear.RIGHT) setFacing(text) // 상대가 읽도록 뒤집어 보여 주는 글자
         // 자동 받아쓰기가 말한 사람의 언어와 다른 글자로 나오면(언어를 잘못 짚은 것) 보여 주지 않음
         val original = liveIn.toString().trim()
         views.first.text = original
