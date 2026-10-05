@@ -28,7 +28,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="이어톡"
+                    android:text="세로말"
                     android:textColor="@color/text"
                     android:textSize="28sp"
                     android:textStyle="bold" />
@@ -37,9 +37,17 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="언어의 경계를 가볍게"
+                    android:text="세상의 말을, 서로의 말로."
                     android:textColor="@color/textDim"
                     android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="영상은 자막으로, 대화는 내 언어로."
+                    android:textColor="@color/textFaint"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <LinearLayout

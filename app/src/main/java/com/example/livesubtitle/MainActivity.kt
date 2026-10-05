@@ -291,7 +291,7 @@ class MainActivity : AppCompatActivity() {
 
         // 2) 다른 앱 위에 표시 권한
         if (!Settings.canDrawOverlays(this)) {
-            toast("'이어톡'을 찾아 '다른 앱 위에 표시'를 허용한 뒤 돌아와서 다시 눌러 주세요.")
+            toast("'세로말'을 찾아 '다른 앱 위에 표시'를 허용한 뒤 돌아와서 다시 눌러 주세요.")
             openOverlaySettings()
             return
         }
@@ -433,7 +433,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
-        findViewById<TextView>(R.id.textVersion).text = "버전 ${version ?: "-"}"
+        findViewById<TextView>(R.id.textVersion).text =
+            "세로말 - 실시간 자막 대화 통역\n" +
+                "세상 서로 말의 의미를 담아, 언어가 다른 사람들의 이해를 돕는 이름입니다.\n\n" +
+                "버전 ${version ?: "-"}"
     }
 
     private fun refreshSettings() {
