@@ -577,7 +577,6 @@ class ConversationActivity : AppCompatActivity() {
         side.current.setLength(0)
         if (text.isNotEmpty()) {
             recentPlayed += side.lastOutputAt to normalize(text) // 마지막 소리가 온 시각 기준
-            HistoryStore.add(this, "대화", text, originalOf(side))
         }
         // 다음 말은 새 말풍선으로
         side.bubbleOriginal = null

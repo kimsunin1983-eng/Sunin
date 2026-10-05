@@ -534,7 +534,6 @@ class CaptionService : Service() {
         var draft: String? = null   // Google 초벌 번역
         var refined: String? = null // Gemini 다듬은 번역
         var fromLive = false        // 실시간 통역에서 온 줄
-        var logged = false          // 기록 탭에 저장했는지
         val best get() = refined ?: draft
     }
 
@@ -557,20 +556,7 @@ class CaptionService : Service() {
         render()
     }
 
-    /** 더 바뀔 일이 없는 줄(마지막 줄 제외)을 기록 탭에 저장 */
-    private fun logFinishedLines(includeLast: Boolean = false) {
-        val end = if (includeLast) lines.size else lines.size - 1
-        for (i in 0 until end) {
-            val l = lines[i]
-            if (!l.logged) {
-                l.logged = true
-                l.best?.let { HistoryStore.add(this, "자막", it, l.original) }
-            }
-        }
-    }
-
     private fun render() {
-        logFinishedLines()
         val o = overlay ?: return
         val pOrig = partialOriginal
         if (pOrig != null) {
@@ -897,7 +883,6 @@ class CaptionService : Service() {
 
     // ───────────────────────── 정리 ─────────────────────────
     override fun onDestroy() {
-        runCatching { logFinishedLines(includeLast = true) }
         stopped = true
         isRunning = false
         main.removeCallbacksAndMessages(null)

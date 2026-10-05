@@ -29,7 +29,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 
-/** 홈 / 기록 / 설정 세 탭을 가진 첫 화면 */
+/** 번역(홈) / 설정 두 탭을 가진 첫 화면 */
 class MainActivity : AppCompatActivity() {
 
     /** 영상 언어: (표시 이름, 음성 인식용 코드). "auto" 는 Gemini 방식에서만 가능 */
@@ -98,17 +98,16 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         migratePrefs()
 
-        pages = listOf(findViewById(R.id.pageHome), findViewById(R.id.pageHistory), findViewById(R.id.pageSettings))
-        navIcons = listOf(findViewById(R.id.navHomeIcon), findViewById(R.id.navHistoryIcon), findViewById(R.id.navSettingsIcon))
-        navTexts = listOf(findViewById(R.id.navHomeText), findViewById(R.id.navHistoryText), findViewById(R.id.navSettingsText))
-        listOf(R.id.navHome, R.id.navHistory, R.id.navSettings).forEachIndexed { i, id ->
+        pages = listOf(findViewById(R.id.pageHome), findViewById(R.id.pageSettings))
+        navIcons = listOf(findViewById(R.id.navHomeIcon), findViewById(R.id.navSettingsIcon))
+        navTexts = listOf(findViewById(R.id.navHomeText), findViewById(R.id.navSettingsText))
+        listOf(R.id.navHome, R.id.navSettings).forEachIndexed { i, id ->
             findViewById<View>(id).setOnClickListener { showPage(i) }
         }
 
         setupHome()
-        setupHistory()
         setupSettings()
-        showPage(savedInstanceState?.getInt("page") ?: 0)
+        showPage((savedInstanceState?.getInt("page") ?: 0).coerceIn(0, 1))
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -120,7 +119,6 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         refreshHome()
         refreshSettings()
-        if (currentPage == 1) refreshHistory()
     }
 
     @Deprecated("Deprecated in Java")
@@ -151,11 +149,7 @@ class MainActivity : AppCompatActivity() {
         val off = ContextCompat.getColor(this, R.color.textDim)
         navIcons.forEachIndexed { i, v -> v.setColorFilter(if (i == index) on else off) }
         navTexts.forEachIndexed { i, v -> v.setTextColor(if (i == index) on else off) }
-        when (index) {
-            0 -> refreshHome()
-            1 -> refreshHistory()
-            2 -> refreshSettings()
-        }
+        if (index == 0) refreshHome() else refreshSettings()
     }
 
     private fun selectSegment(views: List<TextView>, selected: Int) {
@@ -211,13 +205,13 @@ class MainActivity : AppCompatActivity() {
             refreshHome()
         }
 
-        chip.setOnClickListener { showPage(2) }
+        chip.setOnClickListener { showPage(1) }
         findViewById<View>(R.id.cardCaption).setOnClickListener { toggleCaption() }
         buttonStart.setOnClickListener { toggleCaption() }
         findViewById<View>(R.id.cardConversation).setOnClickListener {
             if (keyOrEmpty().isEmpty()) {
                 toast("대화 통역에는 Gemini API 키가 필요해요. 설정에서 입력해 주세요.")
-                showPage(2)
+                showPage(1)
                 return@setOnClickListener
             }
             if (CaptionService.isRunning) stopService(Intent(this, CaptionService::class.java))
@@ -327,29 +321,6 @@ class MainActivity : AppCompatActivity() {
         buttonStart.text = "■  자막 번역 중지"
         toast("자막을 시작했어요. 이제 영상 앱을 열어 재생하세요.")
         moveTaskToBack(true)
-    }
-
-    // ───────────────────────── 기록 ─────────────────────────
-    private fun setupHistory() {
-        findViewById<View>(R.id.buttonClearHistory).setOnClickListener {
-            AlertDialog.Builder(this)
-                .setMessage("기록을 모두 지울까요?")
-                .setPositiveButton("지우기") { _, _ ->
-                    HistoryStore.clear(this)
-                    refreshHistory()
-                }
-                .setNegativeButton("취소", null)
-                .show()
-        }
-    }
-
-    private fun refreshHistory() {
-        val text = HistoryStore.read(this).trim()
-        val view = findViewById<TextView>(R.id.textHistory)
-        view.text = text.ifEmpty { "아직 기록이 없어요.\n자막 번역이나 대화 통역을 쓰면 번역된 문장이 여기에 쌓여요." }
-        view.setTextColor(ContextCompat.getColor(this, if (text.isEmpty()) R.color.textDim else R.color.text))
-        val scroll = findViewById<ScrollView>(R.id.scrollHistory)
-        scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
     }
 
     // ───────────────────────── 설정 ─────────────────────────
