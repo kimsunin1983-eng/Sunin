@@ -194,7 +194,7 @@ class UtteranceTranslator(
             out = runCatching { translateWithGoogle(src, from.code, to.code) }
                 .onFailure { Log.w(TAG, "Google translate failed", it) }
                 .getOrNull()
-                ?.takeIf { valid(it, src, toScript, fromScript, lastResort = true) }
+                ?.takeIf { valid(it, src, toScript, fromScript) }
         }
         if (closed) return
         if (out == null) {
@@ -210,16 +210,10 @@ class UtteranceTranslator(
      * 번역 결과 검사: 비어 있지 않고, 원문을 그대로 따라 쓰지 않았고, 상대 언어 글자로 되어 있어야 함.
      * 단, "OK", "iPhone", "Wi-Fi" 처럼 번역해도 표기가 같은 짧은 말은 같아도 통과시킴.
      */
-    private fun valid(out: String, src: String, toScript: String, fromScript: String, lastResort: Boolean = false): Boolean {
+    private fun valid(out: String, src: String, toScript: String, fromScript: String): Boolean {
         if (out.isBlank()) return false
         if (Scripts.normalize(out) == Scripts.normalize(src)) {
-            // 원문 그대로 나온 경우. "I am sick" 같은 일반 문장은 번역 실패로 봄.
-            val words = src.trim().split(Regex("\\s+"))
-            if (src.length > 24 || Scripts.detect(src) != "latin") return false
-            // 약어·상표 모양(OK, USB, iPhone, Wi-Fi, 5G)만 그대로 통과
-            val brandLike = words.size <= 2 && words.all { w -> w.any { it.isDigit() } || w.drop(1).any { it.isUpperCase() } }
-            // 두 번역기가 모두 그대로 돌려준 한두 단어는 이름으로 봄 (Marriott, Clark)
-            return brandLike || (lastResort && words.size <= 2)
+            return TranslationChecks.permitsUnchanged(src)
         }
         if (toScript != fromScript) {
             val s = Scripts.detect(out) ?: return false
@@ -469,3 +463,4 @@ object Scripts {
 
     fun normalize(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
 }
+

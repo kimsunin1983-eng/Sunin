@@ -359,6 +359,8 @@ class ConversationActivity : AppCompatActivity() {
         transcriber = null
         runCatching { speakerPlayer?.shutdownNow() }
         speakerPlayer = null
+        speakerBusyUntil = 0L
+        speechBuffer.cancelTurn()
         runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.release() }
         speakerTrack = null
 
@@ -423,13 +425,11 @@ class ConversationActivity : AppCompatActivity() {
                         unansweredSpeechMs += 100
                     }
                     utterance?.feed(buf, n, lv)
-                    if (fastMode) {
-                        synchronized(talkLog) {
-                            talkLog.addLast(SystemClock.elapsedRealtime() to buf.copyOf(n))
-                            while (talkLog.size > 320) talkLog.removeFirst() // 최근 32초
-                        }
+                    val client = live
+                    if (fastMode && client?.isReady == true) {
+                        speechBuffer.feed(buf, n, lv >= maxOf(gateLevel, 0.01f), SystemClock.elapsedRealtime())
+                        client.sendAudio(buf, n)
                     }
-                    live?.sendAudio(buf, n)
                 }
             }
             true
@@ -690,7 +690,8 @@ class ConversationActivity : AppCompatActivity() {
     private var liveBubble: Pair<TextView, TextView>? = null
     private var lastLiveOutputAt = 0L
     private val earTimeout = Runnable { if (ear == null) chooseEar(force = true) }
-    private val turnIdle = Runnable { endLiveTurn() }
+    private var liveTurnOpen = false
+    private var heldAudioBytes = 0
 
     /** NONE: 번역이 아닌 출력이라 버림 */
     private enum class Ear { LEFT, RIGHT, BOTH, NONE }
@@ -724,6 +725,11 @@ class ConversationActivity : AppCompatActivity() {
             val quietFor = now - lastSpeechAt
             val idleOutput = now - lastLiveOutputAt > 3000 && ear == null
             if (liveReady) {
+                if (liveTurnOpen && now - lastLiveOutputAt > 30_000) {
+                    renewLive("응답이 멈춰 다시 연결했어요")
+                    main.postDelayed(this, 1000)
+                    return
+                }
                 // 1.5초 넘게 말했는데 말이 끝난 지 6초가 지나도록 번역이 없음 → 놓친 것
                 if (unansweredSpeechMs >= 1500 && quietFor > 6000) {
                     unansweredSpeechMs = 0
@@ -747,6 +753,7 @@ class ConversationActivity : AppCompatActivity() {
         live = null
         liveReady = false
         runCatching { old?.close() }
+        speechBuffer.cancelTurn()
         resetLiveTurn()
         if (message != null) status.text = message
         connectLive()
@@ -790,12 +797,10 @@ class ConversationActivity : AppCompatActivity() {
             )
         }
         transcriber = Transcriber(apiKey)
-        fixExecutor = Executors.newSingleThreadExecutor()
-        pendingChecks.set(0)
-        synchronized(talkLog) { talkLog.clear() }
+        fixExecutor = CheckExecutor.create() // running 1 + waiting 2, owned by this session
+        speechBuffer = LiveSpeechBuffer()
+        speakerBusyUntil = 0L
         recentTurns.clear()
-        turnFirstOutputAt = 0L
-        prevFirstOutputAt = 0L
         if (speakerMode) {
             // 상대에게 가는 번역은 폰 스피커로 (이어폰이 연결돼 있어도 이 소리만 스피커로 보냄)
             speakerTrack = newTrack().also { t ->
@@ -915,11 +920,18 @@ class ConversationActivity : AppCompatActivity() {
                     if (!running || live !== client) return@ui
                     touchLiveTurn()
                     val e = ear
-                    if (e == null) heldAudio += pcm else play(pcm, e)
+                    if (e == null) {
+                        heldAudioBytes += pcm.size
+                        if (heldAudioBytes > OUT_RATE * 2 * 30) {
+                            renewLive("출력 확인이 지연돼 다시 연결했어요")
+                            return@ui
+                        }
+                        heldAudio += pcm
+                    } else play(pcm, e)
                 }
 
                 override fun onTurnComplete() = ui {
-                    if (live === client) endLiveTurn()
+                    if (live === client) endLiveTurn(confirmed = true)
                 }
 
                 override fun onInterrupted() = ui {
@@ -930,13 +942,15 @@ class ConversationActivity : AppCompatActivity() {
                     runCatching { track?.pause(); track?.flush(); track?.play() }
                     runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.play() }
                     speakerBusyUntil = 0L
+                    speechBuffer.cancelTurn()
+                    resetLiveTurn()
                 }
 
                 override fun onClosed(error: String?, gotOutput: Boolean) = ui {
                     if (!running || live !== client) return@ui
                     live = null
                     liveReady = false
-                    endLiveTurn()
+                    endLiveTurn(confirmed = false)
                     if (gotOutput || error == null || error == "goAway") {
                         main.postDelayed({ connectLive() }, 300) // 세션 시간 제한 등 → 다시 연결
                     } else {
@@ -960,25 +974,22 @@ class ConversationActivity : AppCompatActivity() {
             voiceName = voice.ifBlank { null },
             affectiveDialog = variant.affective,
         )
+        speechBuffer = LiveSpeechBuffer()
         live = client
         client.connect()
     }
 
-    /** 번역 소리/글자가 올 때마다: 새 턴이면 귀 선택 대기 시작, 1.5초 조용하면 턴 종료 */
+    /** Network pauses are not utterance boundaries. Only server turnComplete finalizes. */
     private fun touchLiveTurn() {
         misses = 0
         unansweredSpeechMs = 0
         val now = SystemClock.elapsedRealtime()
-        val active = liveOut.isNotEmpty() || heldAudio.isNotEmpty() || ear != null
-        if (active && now - lastLiveOutputAt > 1500) endLiveTurn()
-        if (ear == null && heldAudio.isEmpty() && liveOut.isEmpty()) {
-            turnFirstOutputAt = now // 이번 번역이 나오기 시작한 시각 = 그 말이 끝난 직후
-            main.removeCallbacks(earTimeout)
-            main.postDelayed(earTimeout, 1200) // 글자가 끝내 안 오면 양쪽 귀에 틂
+        if (!liveTurnOpen) {
+            liveTurnOpen = true
+            speechBuffer.beginTurn(now)
+            main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
-        main.removeCallbacks(turnIdle)
-        main.postDelayed(turnIdle, 1500)
     }
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
@@ -988,11 +999,7 @@ class ConversationActivity : AppCompatActivity() {
         // 번역이 아닌 표시 문구면 버림. 오는 중일 수 있으면 조금 더 기다림
         // ("Music" 다음에 " is my life." 가 이어질 수 있으므로, 끝까지 기다렸다가 판단)
         val suspicious = isPlaceholder(text) || mightBecomePlaceholder(text)
-        if (suspicious && !force) return
-        if (suspicious) {
-            dropTurn()
-            return
-        }
+        if (suspicious) return // timeout may choose an ear, but may never discard a partial sentence
 
         val script = detectScript(text)
         // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
@@ -1026,6 +1033,7 @@ class ConversationActivity : AppCompatActivity() {
         ear = chosen
         heldAudio.forEach { play(it, chosen) }
         heldAudio.clear()
+        heldAudioBytes = 0
         renderLiveBubble()
     }
 
@@ -1061,9 +1069,7 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     // ── 원문 바로잡기: 자동 받아쓰기가 틀렸으면 그 말의 소리를 언어를 알려 주고 다시 받아씀 ──
-    private val talkLog = java.util.ArrayDeque<Pair<Long, ByteArray>>()
-    private var turnFirstOutputAt = 0L
-    private var prevFirstOutputAt = 0L
+    @Volatile private var speechBuffer = LiveSpeechBuffer()
     private var transcriber: Transcriber? = null
     private var fixExecutor: ExecutorService? = null
 
@@ -1074,33 +1080,21 @@ class ConversationActivity : AppCompatActivity() {
     private var turnSeq = 0
     /** 상대가 읽는 큰 글자가 지금 몇 번째 말의 것인지 */
     private var facingSeq = -1
-    /** 검산 대기 수 (밀리면 건너뜀) */
-    private val pendingChecks = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ── 번역이 아닌 출력 걸러내기 + 놓친 말 되살리기 ──
     /**
      * 모델이 번역 대신 내보내는 표시 문구인지. 전체가 그런 문구일 때만 해당.
      * ("Music is my life." 처럼 그 단어로 시작하는 정상 문장을 버리지 않도록 앞부분만 보지 않음)
      */
-    private fun isPlaceholder(text: String): Boolean {
-        val t = text.trim().lowercase()
-        if (t.isEmpty()) return false
-        // <...> 또는 [...] 로 통째로 감싼 출력
-        if (BRACKETED.matches(t)) return true
-        return PLACEHOLDER.matches(t)
-    }
+    private fun isPlaceholder(text: String) = LiveOutputPolicy.isPlaceholder(text)
 
-    /** "<no sp" 처럼 표시 문구가 오는 중일 수 있어 더 기다려야 하는지 */
-    private fun mightBecomePlaceholder(text: String): Boolean {
-        val t = text.trim()
-        return (t.startsWith("<") || t.startsWith("[")) && !isPlaceholder(t)
-    }
+    private fun mightBecomePlaceholder(text: String) = LiveOutputPolicy.mightBecomePlaceholder(text)
 
     /** 문장 단위 방식 통역기. 실시간 모델이 말을 놓쳤을 때 그 소리를 한 번 더 통역하는 데 씀 */
     private var rescue: UtteranceTranslator? = null
 
     /** 이번 턴은 번역이 아님: 소리도 말풍선도 내보내지 않고, 그 말은 문장 단위 방식으로 다시 통역 */
-    private fun dropTurn() {
+    private fun dropTurn(pcm: ByteArray?) {
         liveBubble?.let { views ->
             val row = views.second.parent?.parent as? View
             if (row != null) bubbles.removeView(row)
@@ -1110,14 +1104,8 @@ class ConversationActivity : AppCompatActivity() {
         main.removeCallbacks(earTimeout)
         ear = Ear.NONE
 
-        val end = turnFirstOutputAt
-        val start = maxOf(prevFirstOutputAt, end - 30_000)
-        val pcm = synchronized(talkLog) {
-            val out = java.io.ByteArrayOutputStream()
-            talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
-            out.toByteArray()
-        }
-        if (pcm.size >= 32 * 500) rescue?.submitClip(pcm) // 0.5초 이상일 때만
+        if (pcm != null && pcm.size >= 32 * 100) rescue?.submitClip(pcm)
+
     }
 
     private fun rememberTurn(): Turn? {
@@ -1136,25 +1124,18 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     /**
-     * 대화 기록의 원문 줄을 정확하게: 서버의 자동 받아쓰기는 언어도 모르고 부정확해서,
-     * 말이 끝날 때마다 그 소리를 말한 사람의 언어를 알려 주고(번역문도 참고로 주고) 다시 받아써서 바꿔 넣음.
+     * 완결된 음성이 한 발화와 대응할 때만 독립적으로 받아쓰기·번역 후 비교.
+     * 결과가 늦게 도착해도 해당 기록만 수정하고 현재 화면의 발화 번호를 확인함.
      */
-    private fun refineOriginal(context: String, turn: Turn?) {
+    private fun refineOriginal(context: String, turn: Turn?, pcm: ByteArray?) {
         val views = liveBubble ?: return
         val e = ear ?: return
         if (e == Ear.BOTH || e == Ear.NONE) return
         val speaker = if (e == Ear.LEFT) right else left
         if (speaker.lang.code == AUTO) return
 
-        // 이 말의 소리 = 직전 번역이 나오기 시작한 뒤부터 이번 번역이 나오기 시작할 때까지 (최대 15초)
-        val end = turnFirstOutputAt
-        val start = maxOf(prevFirstOutputAt, end - 30_000)
-        val pcm = synchronized(talkLog) {
-            val out = java.io.ByteArrayOutputStream()
-            talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
-            out.toByteArray()
-        }
-        if (pcm.size < 32 * 300) return // 0.3초 미만이면 받아쓸 게 없음
+        // Ambiguous, unfinished, or oversized recordings are never used for corrections.
+        if (pcm == null) return
         val worker = transcriber ?: return
         val target = views.first
         val translatedView = views.second
@@ -1162,15 +1143,12 @@ class ConversationActivity : AppCompatActivity() {
         val translation = liveOut.toString().trim()
         val mine = session
         val seq = turnSeq
-        if (pendingChecks.get() >= 3) return // 검산이 밀렸으면 이번 말은 건너뜀
-        pendingChecks.incrementAndGet()
         runCatching {
             fixExecutor?.execute {
                 // 검산: 같은 소리를 따로 받아쓰고 번역해, 실시간 번역과 뜻이 다르면 기록을 고침
                 val check = runCatching {
                     worker.check(pcm, speaker.lang.english, listener.lang.english, translation, context)
                 }.getOrNull()
-                pendingChecks.decrementAndGet()
                 if (check == null) return@execute
                 ui {
                     if (mine != session) return@ui
@@ -1179,6 +1157,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (heardOk) {
                         target.text = check.src
                         target.visibility = View.VISIBLE
+                        turn?.line = "[${speaker.lang.english}] ${check.src}  →  [${listener.lang.english}] $translation"
                     }
                     val outScript = detectScript(check.out)
                     if (heardOk && !check.same && check.out.isNotBlank() &&
@@ -1195,13 +1174,18 @@ class ConversationActivity : AppCompatActivity() {
         }
     }
 
-    private fun endLiveTurn() {
-        if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
+    private fun endLiveTurn(confirmed: Boolean) {
+        val pcm = if (confirmed) speechBuffer.finishTurn() else {
+            speechBuffer.cancelTurn()
+            null
+        }
+        if (LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)) {
+            dropTurn(pcm)
+        } else if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
         if (liveOut.isNotEmpty()) {
             val before = contextPrompt() // 검산에는 이번 말이 들어가기 전의 맥락만 줌
             val turn = rememberTurn()
-            refineOriginal(before, turn)
-            prevFirstOutputAt = turnFirstOutputAt
+            if (confirmed) refineOriginal(before, turn, pcm)
         }
         if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             // 구형 기기는 버퍼가 차야 재생되므로 무음으로 밀어 줌
@@ -1214,12 +1198,13 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun resetLiveTurn() {
         main.removeCallbacks(earTimeout)
-        main.removeCallbacks(turnIdle)
         liveIn.setLength(0)
         liveOut.setLength(0)
         heldAudio.clear()
         ear = null
         liveBubble = null
+        liveTurnOpen = false
+        heldAudioBytes = 0
         turnSeq++
         lastLiveOutputAt = 0L
     }
@@ -1508,13 +1493,6 @@ class ConversationActivity : AppCompatActivity() {
         /** 전체가 <...> 또는 [...] */
         /** 번역 목소리 증폭 배수 */
         private const val OUT_GAIN = 2.8f
-        private val BRACKETED = Regex("^(<[^<>]*>|\\[[^\\[\\]]*\\])[.!]?$")
-        /** 전체가 이런 문구 (괄호가 있어도 됨) */
-        private val PLACEHOLDER = Regex(
-            "^\\(?(no speech( detected)?|no audio( detected)?|silence|silent|inaudible|unintelligible|" +
-                "noise|background noise|music|background music|\\.\\.\\.)\\)?[.!]?$"
-        )
-
         /** (화면 이름, 모델에 알려 줄 설명) */
         private val SITUATIONS = listOf(
             "일상 대화" to "everyday conversation between two people",
@@ -1538,3 +1516,4 @@ class ConversationActivity : AppCompatActivity() {
         private const val OUT_RATE = 24000
     }
 }
+

@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
           gradle-version: "8.9"
 
       - name: Build
-        run: gradle assembleDebug --stacktrace
+        run: gradle testDebugUnitTest assembleDebug --stacktrace
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk LiveSubtitle.apk
@@ -35,6 +35,7 @@ jobs:
           path: LiveSubtitle.apk
 
       - name: Publish to Releases (폰에서 바로 받기용)
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
@@ -42,3 +43,4 @@ jobs:
           body: 폰에서 아래 LiveSubtitle.apk 를 눌러 내려받아 설치하세요.
           files: LiveSubtitle.apk
           make_latest: true
+
