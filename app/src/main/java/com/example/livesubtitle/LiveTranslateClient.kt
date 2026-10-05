@@ -44,8 +44,6 @@ class LiveTranslateClient(
     private val voiceName: String? = null,
     /** 말하는 사람의 감정·어조에 맞춰 말하기 (지원하는 모델에서만) */
     private val affectiveDialog: Boolean = false,
-    /** 낮을수록 들은 대로만 옮기고 덜 지어냄. null 이면 모델 기본 */
-    private val temperature: Double? = null,
 ) {
     interface Listener {
         fun onReady()
@@ -108,7 +106,7 @@ class LiveTranslateClient(
     private fun setupMessage(): String =
         buildSetup(
             translationInGenerationConfig, targetLanguage, echoTarget, model, systemInstruction, noInterruption,
-            voiceName, affectiveDialog, temperature
+            voiceName, affectiveDialog
         ).toString()
 
     private fun handle(text: String) {
@@ -187,7 +185,6 @@ class LiveTranslateClient(
             noInterruption: Boolean = false,
             voiceName: String? = null,
             affectiveDialog: Boolean = false,
-            temperature: Double? = null,
         ): JSONObject {
             val translation = JSONObject()
                 .put("targetLanguageCode", targetLanguage)
@@ -204,7 +201,6 @@ class LiveTranslateClient(
                 )
             }
             if (affectiveDialog) generationConfig.put("enableAffectiveDialog", true)
-            if (temperature != null) generationConfig.put("temperature", temperature)
             val setup = JSONObject()
                 .put("model", "models/$model")
                 .put("inputAudioTranscription", JSONObject())
