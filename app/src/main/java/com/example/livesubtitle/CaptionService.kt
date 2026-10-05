@@ -103,6 +103,8 @@ class CaptionService : Service() {
     private var geminiKey = ""
     private var showOriginal = false
     private var captionLines = 3
+    /** 홈에서 영상 언어를 '자동 감지'로 골랐는지 */
+    private var autoLanguage = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -159,17 +161,23 @@ class CaptionService : Service() {
         }
         overlay?.setStatus("준비 중…")
 
+        autoLanguage = intent.getStringExtra(EXTRA_LANG_NAME) == "자동 감지"
         if (useSystemAudio) {
             val ok = startSystemCapture(intent)
             if (!ok) {
                 overlay?.setStatus("폰 소리를 가져오지 못해 마이크로 전환했어요.")
                 useSystemAudio = false
+                // 마이크를 쓰려면 서비스 유형도 '마이크'로 다시 알려야 함 (Android 14+)
+                runCatching { startAsForeground() }.onFailure { Log.w(TAG, "re-foreground failed", it) }
             }
         }
 
         if (wantLive || wantListen) {
             // Gemini 방식은 소리를 직접 보내야 하므로 마이크 모드에서도 직접 녹음
-            if (!useSystemAudio) startMicCapture()
+            if (!useSystemAudio && !startMicCapture()) {
+                overlay?.setStatus("마이크를 열지 못했어요. 다른 앱이 마이크를 쓰고 있는지 확인한 뒤 다시 시작해 주세요.")
+                return START_NOT_STICKY
+            }
             if (wantLive) startLive() else startListen()
         } else {
             startClassic()
@@ -179,6 +187,15 @@ class CaptionService : Service() {
 
     /** 기본 모드: 폰 음성 인식 → Google 초벌 → Gemini 다듬기 */
     private fun startClassic() {
+        if (autoLanguage) {
+            // 기본 방식은 언어를 스스로 알아내지 못함 → 영어로 인식한다는 사실을 숨기지 않음
+            overlay?.setLabel("영어 → 한국어")
+            Toast.makeText(
+                this,
+                "자동 감지를 쓸 수 없어 영어로 인식해요. 다른 언어의 영상이면 홈에서 영상 언어를 고른 뒤 다시 시작해 주세요.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
         setupTranslator()
         createRecognizer()
         startListening()
@@ -266,8 +283,8 @@ class CaptionService : Service() {
 
     /** 마이크 녹음 (실시간 통역 모드 + 마이크로 듣기일 때) */
     @SuppressLint("MissingPermission")
-    private fun startMicCapture() {
-        try {
+    private fun startMicCapture(): Boolean {
+        return try {
             val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
             )
@@ -278,11 +295,13 @@ class CaptionService : Service() {
             )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 record.release()
-                return
+                return false
             }
             startCaptureLoop(record)
+            true
         } catch (e: Exception) {
             Log.e(TAG, "mic capture failed", e)
+            false
         }
     }
 
@@ -579,12 +598,19 @@ class CaptionService : Service() {
     }
 
     /** 초벌 번역: 온라인 Google 번역, 안 되면 ML Kit */
+    /** 중지된 뒤에는 새 작업을 받지 않음 (닫힌 실행기에 넣으면 예외) */
+    private fun runOnNet(task: () -> Unit) {
+        if (stopped) return
+        runCatching { netExecutor.execute { task() } }
+    }
+
     private fun translateDraft(line: Line) {
-        netExecutor.execute {
+        runOnNet {
             val online = runCatching { translateOnline(line.original) }
                 .onFailure { Log.w(TAG, "online translate failed", it) }
                 .getOrNull()
             main.post {
+                if (stopped) return@post
                 if (online != null) {
                     line.draft = online
                     render()
@@ -620,9 +646,10 @@ class CaptionService : Service() {
         partialInFlight = true
         lastPartialSent = text
         val utt = utterance
-        netExecutor.execute {
+        runOnNet {
             val r = runCatching { translateOnline(text) }.getOrNull()
             main.post {
+                if (stopped) return@post
                 // 그사이 문장이 끝났으면 버림
                 if (r != null && utt == utterance && partialOriginal != null) {
                     partialDraft = r
@@ -630,6 +657,7 @@ class CaptionService : Service() {
                 }
                 // 번역 서버에 너무 자주 요청하지 않도록 잠깐 쉬었다가 최신 것만 이어서 요청
                 main.postDelayed({
+                    if (stopped) return@postDelayed
                     partialInFlight = false
                     val next = pendingPartial
                     pendingPartial = null
@@ -679,7 +707,7 @@ class CaptionService : Service() {
         val drafts = if (batch.any { it.fromLive }) batch.map { it.draft } else null
         refineInFlight = true
         lastRefineAt = SystemClock.elapsedRealtime()
-        netExecutor.execute {
+        runOnNet {
             val result = runCatching { r.refine(context, originals, drafts) }.getOrNull()
             main.post {
                 refineInFlight = false
@@ -827,7 +855,7 @@ class CaptionService : Service() {
     private fun startListen() {
         if (stopped) return
         usingListen = true
-        if (!gotAnyResult) overlay?.setStatus("Gemini 듣기 번역 중 · 영상을 재생하세요 (2~4초 늦게 나와요)")
+        if (!gotAnyResult) overlay?.setStatus("Gemini 듣기 번역 중 · 영상을 재생하세요 (문장이 끝난 뒤에 나와요)")
         audioTranslator = GeminiAudioTranslator(geminiKey, object : GeminiAudioTranslator.Listener {
             override fun onSubtitles(lines: List<Pair<String, String>>) = main.post {
                 if (!usingListen) return@post

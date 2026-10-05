@@ -143,9 +143,8 @@ class LiveTranslateClient(
                 listener.onOutputText(it)
             }
         }
-        if (content.optBoolean("turnComplete") || content.optBoolean("generationComplete")) {
-            listener.onTurnComplete()
-        }
+        // generationComplete(생성만 끝남)는 끝이 아님. 뒤늦게 오는 원문 받아쓰기가 있으므로 turnComplete 만 끝으로 봄
+        if (content.optBoolean("turnComplete")) listener.onTurnComplete()
     }
 
     /** 16kHz 16bit mono PCM */

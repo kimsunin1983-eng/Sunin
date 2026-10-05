@@ -25,6 +25,8 @@ class UtteranceTranslator(
     private val langA: Language,
     private val langB: Language,
     private val listener: Listener,
+    /** 상황·말투·이름 등 번역에 참고할 내용 (통역 설정) */
+    private val extraContext: String = "",
 ) {
     /** english: 모델에 알려 줄 이름, code: ko / en / ja / zh-CN … */
     data class Language(val english: String, val code: String)
@@ -106,15 +108,48 @@ class UtteranceTranslator(
         if (!closed) submit(pcm)
     }
 
+    // 통역을 기다리는 문장들. 서버가 느릴 때 끝없이 밀리지 않도록 최대 3개까지만 둠
+    private val queue = ArrayDeque<ByteArray>()
+    private val pumping = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private fun submit(pcm: ByteArray) {
-        listener.onPending(pending.incrementAndGet())
-        worker.execute {
-            try {
-                if (!closed) interpret(pcm)
-            } catch (e: Exception) {
-                Log.w(TAG, "interpret failed", e)
-            } finally {
-                listener.onPending(pending.decrementAndGet())
+        var dropped = false
+        val waiting = synchronized(queue) {
+            queue.addLast(pcm)
+            while (queue.size > MAX_WAITING) {
+                queue.removeFirst()
+                dropped = true
+            }
+            queue.size
+        }
+        pending.set(waiting)
+        listener.onPending(waiting)
+        if (dropped) listener.onError("말이 밀려서 앞의 한 문장을 건너뛰었어요.", fatal = false)
+        if (pumping.compareAndSet(false, true)) {
+            runCatching { worker.execute { pump() } }.onFailure { pumping.set(false) }
+        }
+    }
+
+    private fun pump() {
+        try {
+            while (!closed) {
+                val pcm = synchronized(queue) { if (queue.isEmpty()) null else queue.removeFirst() } ?: return
+                try {
+                    interpret(pcm)
+                } catch (e: InterruptedException) {
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "interpret failed", e)
+                }
+                val left = synchronized(queue) { queue.size }
+                pending.set(left)
+                if (!closed) listener.onPending(left)
+            }
+        } finally {
+            pumping.set(false)
+            val more = synchronized(queue) { queue.isNotEmpty() }
+            if (more && !closed && pumping.compareAndSet(false, true)) {
+                runCatching { worker.execute { pump() } }.onFailure { pumping.set(false) }
             }
         }
     }
@@ -126,8 +161,20 @@ class UtteranceTranslator(
         val src = heard.second.trim()
         if (src.isEmpty()) return
 
+        if (closed) return
+
         // 2) 누가 말했는지: 글자 종류로 판단, 구분이 안 되는 언어쌍만 모델의 판단을 따름
         val srcScript = Scripts.detect(src)
+        if (srcScript == null) {
+            // 숫자·기호만 있는 말(예: "123", "3.5")은 번역할 것이 없으므로 그대로 전달
+            val isA = when (heard.first) {
+                "A" -> true
+                "B" -> false
+                else -> return
+            }
+            listener.onResult(isA, src, src)
+            return
+        }
         val speakerIsA = when {
             scriptA != scriptB && srcScript != null && Scripts.matches(srcScript, scriptA, scriptB) -> true
             scriptA != scriptB && srcScript != null && Scripts.matches(srcScript, scriptB, scriptA) -> false
@@ -149,6 +196,7 @@ class UtteranceTranslator(
                 .getOrNull()
                 ?.takeIf { valid(it, src, toScript, fromScript) }
         }
+        if (closed) return
         if (out == null) {
             listener.onError("번역하지 못했어요. 다시 말해 주세요.", fatal = false)
             return
@@ -158,10 +206,17 @@ class UtteranceTranslator(
         listener.onResult(speakerIsA, src, out)
     }
 
-    /** 번역 결과 검사: 비어 있지 않고, 원문을 그대로 따라 쓰지 않았고, 상대 언어 글자로 되어 있어야 함 */
+    /**
+     * 번역 결과 검사: 비어 있지 않고, 원문을 그대로 따라 쓰지 않았고, 상대 언어 글자로 되어 있어야 함.
+     * 단, "OK", "iPhone", "Wi-Fi" 처럼 번역해도 표기가 같은 짧은 말은 같아도 통과시킴.
+     */
     private fun valid(out: String, src: String, toScript: String, fromScript: String): Boolean {
         if (out.isBlank()) return false
-        if (Scripts.normalize(out) == Scripts.normalize(src)) return false
+        if (Scripts.normalize(out) == Scripts.normalize(src)) {
+            // 짧은 알파벳·숫자 표기(상표, 약어, 이름)는 그대로가 맞는 번역
+            return src.length <= 24 && src.trim().split(Regex("\\s+")).size <= 3 &&
+                Scripts.detect(src) == "latin"
+        }
         if (toScript != fromScript) {
             val s = Scripts.detect(out) ?: return false
             if (!Scripts.matches(s, toScript, fromScript)) return false
@@ -222,8 +277,10 @@ class UtteranceTranslator(
               Example: <text>How are you?</text> must become the same question in ${to.english}, not an answer such as "I'm fine".
             - Natural spoken style; keep the speaker's tone and politeness level.
             - The text came from speech recognition; fix obvious recognition slips using context.
+            - Keep numbers, dates, prices, units, negations (not / never / no) and conditions exactly as said. Do not change or round them.
+            - Do not invent content for parts that are unclear; translate what is there.
             - Write the translation in ${to.english} only. No romanization, notes, or quotes.
-        """.trimIndent()
+        """.trimIndent() + if (extraContext.isBlank()) "" else "\n\n" + extraContext
         val context = if (history.isEmpty()) "" else
             "Earlier lines of the conversation, for context only (do not translate them):\n" +
                 history.joinToString("\n") + "\n\n"
@@ -365,6 +422,7 @@ class UtteranceTranslator(
         private const val TAG = "LiveSubtitle"
         private const val END_SILENCE_CHUNKS = 7        // 0.7초 조용하면 말이 끝난 것으로
         private const val MAX_BYTES = 32 * 15_000       // 한 번에 최대 15초
+        private const val MAX_WAITING = 3               // 통역 대기 문장 수 상한
     }
 }
 

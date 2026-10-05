@@ -172,6 +172,11 @@ class SubtitleOverlay(
         root.postDelayed({ hint.visibility = View.GONE }, 8000)
     }
 
+    /** 왼쪽 위 언어 표시를 바꿈 (번역 방식이 바뀌었을 때) */
+    fun setLabel(text: String) {
+        labelView.text = text
+    }
+
     /** 안내·오류 문구 한 줄 */
     fun setStatus(text: String) {
         previous.forEach { it.visibility = View.GONE }

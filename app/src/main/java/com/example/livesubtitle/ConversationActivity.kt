@@ -97,6 +97,8 @@ class ConversationActivity : AppCompatActivity() {
     private lateinit var textFacing: TextView
 
     @Volatile private var running = false
+    /** 통역을 시작할 때마다 올라가는 번호. 이전 통역에서 늦게 돌아온 결과를 가려내는 데 씀 */
+    @Volatile private var session = 0
     @Volatile private var micActive = false
     private var fastMode = false
     private var record: AudioRecord? = null
@@ -195,6 +197,21 @@ class ConversationActivity : AppCompatActivity() {
         }
         loadTalkSettings()
         updateStatus()
+        getSystemService(AudioManager::class.java).registerAudioDeviceCallback(deviceCallback, main)
+    }
+
+    /** 이어폰이 빠지거나 연결되면 바로 반영 (빠진 채로 스피커 소리를 다시 번역하지 않도록) */
+    private val deviceCallback = object : android.media.AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = ui { onDevicesChanged() }
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) = ui { onDevicesChanged() }
+    }
+
+    private fun onDevicesChanged() {
+        val had = headphones
+        updateStatus()
+        if (running && had && !headphones) {
+            toast("이어폰 연결이 끊겼어요. 번역이 폰 스피커로 나오는 동안에는 마이크를 잠깐 쉬어요.")
+        }
     }
 
     override fun onResume() {
@@ -208,6 +225,7 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(deviceCallback) }
         runCatching { tts?.shutdown() }
         tts = null
         super.onDestroy()
@@ -232,9 +250,9 @@ class ConversationActivity : AppCompatActivity() {
         }
         if (!running) {
             status.text = if (fastMode) {
-                "실시간: 말이 끝나면 바로 번역이 들려요"
+                "실시간: 말이 끝나면 곧바로 번역해요"
             } else {
-                "문장 단위: 단계별로 확인해 정확하지만 3~5초 걸려요"
+                "문장 단위: 받아쓰기와 번역을 단계별로 확인해요. 실시간보다 몇 초 더 걸려요"
             }
         }
     }
@@ -277,6 +295,9 @@ class ConversationActivity : AppCompatActivity() {
         left.lang = languages[spinnerLeft.selectedItemPosition]
         right.lang = languages[spinnerRight.selectedItemPosition]
 
+        session++
+        playGen++
+        speakerRouteChecked = false
         running = true
         textFacing.text = ""
         if (fastMode) startFast() else startSteady()
@@ -293,6 +314,8 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun stop(message: String) {
         running = false
+        session++
+        playGen++
         micActive = false
         main.removeCallbacksAndMessages(null)
         runCatching { record?.stop() }
@@ -574,33 +597,37 @@ class ConversationActivity : AppCompatActivity() {
     private fun startSteady() {
         ensureTts()
         // A = 왼쪽 사람의 언어, B = 오른쪽 사람의 언어
+        val mine = session
         utterance = UtteranceTranslator(
             apiKey,
             UtteranceTranslator.Language(left.lang.english, left.lang.code),
             UtteranceTranslator.Language(right.lang.english, right.lang.code),
             object : UtteranceTranslator.Listener {
                 override fun onSpeaking(speaking: Boolean) = ui {
+                    if (mine != session) return@ui
                     hearing = speaking
                     refreshSteadyStatus()
                 }
 
                 override fun onPending(count: Int) = ui {
+                    if (mine != session) return@ui
                     waiting = count
                     refreshSteadyStatus()
                 }
 
                 override fun onResult(speakerIsA: Boolean, src: String, out: String) = ui {
-                    if (!running) return@ui
+                    if (!running || mine != session) return@ui
                     val speaker = if (speakerIsA) left else right
                     addBubble(speaker, src, out)
                     speak(out, other(speaker))
                 }
 
                 override fun onError(message: String, fatal: Boolean) = ui {
-                    if (!running) return@ui
+                    if (!running || mine != session) return@ui
                     if (fatal) stop(message) else status.text = message
                 }
-            }
+            },
+            extraContext = contextPrompt(), // 상황·말투·이름 설정을 문장 단위 방식에도 반영
         )
     }
 
@@ -721,6 +748,7 @@ class ConversationActivity : AppCompatActivity() {
         player = Executors.newSingleThreadExecutor()
         // 두 언어가 정해져 있으면, 실시간 모델이 놓친 말을 되살릴 통역기를 준비
         rescue = null
+        val mine = session
         if (left.lang.code != AUTO && right.lang.code != AUTO) {
             ensureTts()
             rescue = UtteranceTranslator(
@@ -732,7 +760,7 @@ class ConversationActivity : AppCompatActivity() {
                     override fun onPending(count: Int) {}
                     override fun onError(message: String, fatal: Boolean) {}
                     override fun onResult(speakerIsA: Boolean, src: String, out: String) = ui {
-                        if (!running || !fastMode) return@ui
+                        if (!running || !fastMode || mine != session) return@ui
                         val speaker = if (speakerIsA) left else right
                         addBubble(speaker, src, out)
                         if (speakerMode) {
@@ -742,7 +770,8 @@ class ConversationActivity : AppCompatActivity() {
                             speak(out, other(speaker))
                         }
                     }
-                }
+                },
+                extraContext = contextPrompt(),
             )
         }
         transcriber = Transcriber(apiKey)
@@ -807,6 +836,7 @@ class ConversationActivity : AppCompatActivity() {
             - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
             - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
             - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - Keep numbers, dates, prices, units, negations and conditions exactly as said. Never change or round them.
             - If you hear only silence, noise, or music, say nothing.
         """.trimIndent()
 
@@ -827,6 +857,7 @@ class ConversationActivity : AppCompatActivity() {
             - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
             - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
             - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - Keep numbers, dates, prices, units, negations and conditions exactly as said. Never change or round them.
             - If you hear only silence, noise, or music, say nothing.
         """.trimIndent()
     }
@@ -861,10 +892,6 @@ class ConversationActivity : AppCompatActivity() {
                     touchLiveTurn()
                     liveOut.append(delta)
                     if (ear == Ear.NONE) return@ui
-                    if (isPlaceholder(liveOut.toString())) {
-                        dropTurn()
-                        return@ui
-                    }
                     if (ear == null) chooseEar(force = false) else renderLiveBubble()
                 }
 
@@ -883,6 +910,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (live !== client) return@ui
                     // 모델이 하던 말을 끊음 → 재생 대기 중인 소리를 비움
                     heldAudio.clear()
+                    playGen++ // 줄 서 있던 이전 소리도 재생하지 않음
                     runCatching { track?.pause(); track?.flush(); track?.play() }
                     runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.play() }
                     speakerBusyUntil = 0L
@@ -940,22 +968,36 @@ class ConversationActivity : AppCompatActivity() {
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
     private fun chooseEar(force: Boolean) {
         if (ear == Ear.NONE) return
-        val script = detectScript(liveOut.toString())
+        val text = liveOut.toString()
+        // 번역이 아닌 표시 문구면 버림. 오는 중일 수 있으면 조금 더 기다림
+        if (isPlaceholder(text) || (force && mightBecomePlaceholder(text))) {
+            dropTurn()
+            return
+        }
+        if (!force && mightBecomePlaceholder(text)) return
+
+        val script = detectScript(text)
+        // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단
+        val enough = text.count { it.isLetter() } >= 4
         val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
+        val scripts = setOf(left.script, right.script)
         val chosen = when {
             autoSide != null -> {
                 // 정해진 언어 글자로 나온 번역은 그 사람 귀에, 그 밖의 글자는 자동 감지 쪽 귀에
                 val known = other(autoSide)
                 when {
                     known.script == "latin" -> Ear.BOTH // 알파벳 언어는 다른 알파벳 언어와 글자로 구분 불가
-                    script == null -> if (force) Ear.BOTH else return
+                    script == null || !enough -> if (force) Ear.BOTH else return
                     script == known.script -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
                     else -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
                 }
             }
             left.script == right.script -> Ear.BOTH // 글자로 구분 못 하는 언어쌍은 양쪽에
-            script != null && matches(script, left) -> Ear.LEFT
-            script != null && matches(script, right) -> Ear.RIGHT
+            script == null || !enough -> if (force) Ear.BOTH else return
+            // 일본어↔중국어: 한자만으로는 어느 쪽인지 알 수 없음 → 가나가 나올 때까지 기다리고, 끝내 없으면 양쪽
+            scripts == setOf("ja", "han") && script == "han" -> if (force) Ear.BOTH else return
+            matches(script, left) -> Ear.LEFT
+            matches(script, right) -> Ear.RIGHT
             force -> Ear.BOTH
             else -> return
         }
@@ -1005,12 +1047,22 @@ class ConversationActivity : AppCompatActivity() {
     private val recentTurns = java.util.ArrayDeque<String>()
 
     // ── 번역이 아닌 출력 걸러내기 + 놓친 말 되살리기 ──
-    /** 모델이 번역 대신 내보내는 표시 문구인지 (예: "<no speech detected>", "[silence]") */
+    /**
+     * 모델이 번역 대신 내보내는 표시 문구인지. 전체가 그런 문구일 때만 해당.
+     * ("Music is my life." 처럼 그 단어로 시작하는 정상 문장을 버리지 않도록 앞부분만 보지 않음)
+     */
     private fun isPlaceholder(text: String): Boolean {
         val t = text.trim().lowercase()
         if (t.isEmpty()) return false
-        if (t.startsWith("<") || t.startsWith("[")) return true
-        return PLACEHOLDER.containsMatchIn(t)
+        // <...> 또는 [...] 로 통째로 감싼 출력
+        if (BRACKETED.matches(t)) return true
+        return PLACEHOLDER.matches(t)
+    }
+
+    /** "<no sp" 처럼 표시 문구가 오는 중일 수 있어 더 기다려야 하는지 */
+    private fun mightBecomePlaceholder(text: String): Boolean {
+        val t = text.trim()
+        return (t.startsWith("<") || t.startsWith("[")) && !isPlaceholder(t)
     }
 
     /** 문장 단위 방식 통역기. 실시간 모델이 말을 놓쳤을 때 그 소리를 한 번 더 통역하는 데 씀 */
@@ -1074,10 +1126,12 @@ class ConversationActivity : AppCompatActivity() {
         val target = views.first
         val language = speaker.lang.english
         val translation = liveOut.toString().trim()
+        val mine = session
         runCatching {
             fixExecutor?.execute {
                 val text = runCatching { worker.transcribe(pcm, language, translation) }.getOrNull()
                 if (!text.isNullOrBlank()) ui {
+                    if (mine != session) return@ui
                     val script = detectScript(text)
                     if (script != null && matches(script, speaker)) {
                         target.text = text
@@ -1144,6 +1198,9 @@ class ConversationActivity : AppCompatActivity() {
             }
     }
 
+    /** 재생 세대. 중단·중지 때 올려서, 이미 줄 서 있던 이전 소리가 뒤늦게 재생되지 않게 함 */
+    @Volatile private var playGen = 0
+
     private var speakerTrack: AudioTrack? = null
     private var speakerPlayer: ExecutorService? = null
     /** 폰 스피커로 내보낸 소리가 다 나올 것으로 예상되는 시각 */
@@ -1181,18 +1238,36 @@ class ConversationActivity : AppCompatActivity() {
                 val out = stereo(mono, toLeft = true, toRight = true)
                 val ms = mono.size / 2 * 1000L / OUT_RATE
                 speakerBusyUntil = maxOf(now, speakerBusyUntil) + ms
-                runCatching { speakerPlayer?.execute { runCatching { t?.write(out, 0, out.size) } } }
+                val gen = playGen
+                runCatching { speakerPlayer?.execute { if (gen == playGen) runCatching { t?.write(out, 0, out.size) } } }
+                checkSpeakerRoute()
             }
             if (e != Ear.LEFT) { // 나에게 → 이어폰 양쪽
                 val t = track ?: return
                 val out = stereo(mono, toLeft = true, toRight = true)
-                runCatching { player?.execute { runCatching { t.write(out, 0, out.size) } } }
+                val gen = playGen
+                runCatching { player?.execute { if (gen == playGen) runCatching { t.write(out, 0, out.size) } } }
             }
             return
         }
         val t = track ?: return
         val out = stereo(mono, toLeft = e != Ear.RIGHT, toRight = e != Ear.LEFT)
-        runCatching { player?.execute { runCatching { t.write(out, 0, out.size) } } }
+        val gen = playGen
+        runCatching { player?.execute { if (gen == playGen) runCatching { t.write(out, 0, out.size) } } }
+    }
+
+    // ── H. 스피커 방식: 실제로 폰 스피커로 나가는지 한 번 확인 ──
+    private var speakerRouteChecked = false
+
+    private fun checkSpeakerRoute() {
+        if (speakerRouteChecked) return
+        speakerRouteChecked = true
+        main.postDelayed({
+            val routed = runCatching { speakerTrack?.routedDevice?.type }.getOrNull() ?: return@postDelayed
+            if (running && routed != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                toast("이 폰에서는 번역을 스피커로 따로 보내지 못하고 있어요. 상대에게 가는 번역도 이어폰으로 나와요.")
+            }
+        }, 800)
     }
 
     // ───────────────────────── 화면 표시 ─────────────────────────
@@ -1354,7 +1429,13 @@ class ConversationActivity : AppCompatActivity() {
             "1007|invalid|unknown name|cannot find field|not found|not supported|unsupported|unimplemented",
             RegexOption.IGNORE_CASE
         )
-        private val PLACEHOLDER = Regex("^\\(?(no speech|no audio|silence|inaudible|unintelligible|noise|music|background)")
+        /** 전체가 <...> 또는 [...] */
+        private val BRACKETED = Regex("^(<[^<>]*>|\\[[^\\[\\]]*\\])[.!]?$")
+        /** 전체가 이런 문구 (괄호가 있어도 됨) */
+        private val PLACEHOLDER = Regex(
+            "^\\(?(no speech( detected)?|no audio( detected)?|silence|silent|inaudible|unintelligible|" +
+                "noise|background noise|music|background music|\\.\\.\\.)\\)?[.!]?$"
+        )
 
         /** (화면 이름, 모델에 알려 줄 설명) */
         private val SITUATIONS = listOf(

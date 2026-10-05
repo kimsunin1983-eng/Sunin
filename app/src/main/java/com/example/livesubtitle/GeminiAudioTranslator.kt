@@ -8,7 +8,6 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 /**
@@ -49,12 +48,13 @@ class GeminiAudioTranslator(
     private var silenceMs = 0
     private var lengthMs = 0
 
-    // ── 보내기 대기열 (worker 스레드) ──
+    // ── 보내기 대기열 ──
+    // 소리 조각은 캡처 스레드가 pending 에 바로 넣고(20초 넘으면 오래된 것부터 버림),
+    // 보내는 일은 worker 한 곳에서만 한다. 서버 응답을 기다리는 동안에도 제한이 계속 적용된다.
     private val pending = ArrayList<ByteArray>()
-    private var inFlight = false
+    private val pumping = java.util.concurrent.atomic.AtomicBoolean(false)
     private var lastSendAt = 0L
-    private var cooldownUntil = 0L
-    private var sendScheduled = false
+    @Volatile private var cooldownUntil = 0L
     private val history = ArrayDeque<Pair<String, String>>()
 
     // "빠르게 답하기(thinkingBudget 0)" 설정을 거절한 모델 목록 → 이 모델엔 설정 없이 보냄
@@ -89,43 +89,51 @@ class GeminiAudioTranslator(
             hasSpeech = false
             silenceMs = 0
             lengthMs = 0
-            worker.execute {
+            synchronized(pending) {
                 pending += chunk
                 // 너무 쌓이면 오래된 소리부터 버림 (지연 방지)
                 while (pending.sumOf { it.size } > MAX_PENDING_BYTES && pending.size > 1) pending.removeAt(0)
-                trySend()
+            }
+            if (pumping.compareAndSet(false, true)) {
+                runCatching { worker.execute { pump() } }.onFailure { pumping.set(false) }
             }
         }
     }
 
-    private fun trySend() {
-        if (closed || inFlight || pending.isEmpty()) return
-        val now = System.currentTimeMillis()
-        val wait = maxOf(lastSendAt + MIN_INTERVAL_MS - now, cooldownUntil - now)
-        if (wait > 0) {
-            if (!sendScheduled) {
-                sendScheduled = true
-                worker.schedule({ sendScheduled = false; trySend() }, wait, TimeUnit.MILLISECONDS)
-            }
-            return
-        }
-        val pcm = ByteArrayOutputStream().apply { pending.forEach { write(it) } }.toByteArray()
-        pending.clear()
-        inFlight = true
-        lastSendAt = now
+    /** 쌓인 소리를 모아 4초에 한 번 이하로 보냄. worker 스레드에서만 실행 */
+    private fun pump() {
         try {
-            val result = request(pcm)
-            if (result != null && result.isNotEmpty()) {
-                result.forEach {
-                    history.addLast(it)
-                    while (history.size > 6) history.removeFirst()
+            while (!closed) {
+                val wait = maxOf(lastSendAt + MIN_INTERVAL_MS, cooldownUntil) - System.currentTimeMillis()
+                if (wait > 0) Thread.sleep(wait)
+                val pcm = synchronized(pending) {
+                    if (pending.isEmpty()) return
+                    val out = ByteArrayOutputStream()
+                    pending.forEach { out.write(it) }
+                    pending.clear()
+                    out.toByteArray()
                 }
-                listener.onSubtitles(result)
+                lastSendAt = System.currentTimeMillis()
+                val result = request(pcm)
+                if (closed) return
+                if (!result.isNullOrEmpty()) {
+                    result.forEach {
+                        history.addLast(it)
+                        while (history.size > 6) history.removeFirst()
+                    }
+                    listener.onSubtitles(result)
+                }
             }
+        } catch (e: InterruptedException) {
+            // 종료
         } finally {
-            inFlight = false
+            pumping.set(false)
+            // 마지막 확인과 플래그 해제 사이에 들어온 조각이 있으면 다시 시작
+            val more = synchronized(pending) { pending.isNotEmpty() }
+            if (more && !closed && pumping.compareAndSet(false, true)) {
+                runCatching { worker.execute { pump() } }.onFailure { pumping.set(false) }
+            }
         }
-        trySend()
     }
 
     /** 성공 시 자막 목록(말이 없으면 빈 목록), 실패 시 null */
@@ -282,6 +290,8 @@ class GeminiAudioTranslator(
             - 앞 자막의 흐름, 말투(반말/존댓말), 호칭을 이어 간다.
             - 오디오는 문장 중간에서 시작하거나 끝날 수 있다. 앞 자막과 이어지는 부분은 자연스럽게 이어 번역한다.
             - 군말과 불필요한 반복은 빼고, 자막답게 짧고 한눈에 읽히게 쓴다. 한 항목은 한 문장 정도.
+            - 숫자·날짜·금액·단위, 부정 표현(아니다/없다/못 한다), 고유명사는 들은 그대로 옮기고 바꾸지 않는다.
+            - 잘 안 들린 부분을 그럴듯하게 지어내지 않는다. 확실히 들은 부분만 옮긴다.
             - 배경음악, 노래 가사, 효과음, 알아들을 수 없는 소리는 무시한다.
             - 말소리가 없으면 빈 배열 []을 출력한다.
             - 출력: [{"src": 원문, "ko": 한국어 자막}, ...] JSON 배열만. 설명은 쓰지 않는다.

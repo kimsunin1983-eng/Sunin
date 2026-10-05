@@ -279,7 +279,7 @@
 
             <TextView
                 style="@style/RowLabel"
-                android:text="자막 줄 수" />
+                android:text="보여 줄 문장 수" />
 
             <TextView
                 android:id="@+id/valueLines"

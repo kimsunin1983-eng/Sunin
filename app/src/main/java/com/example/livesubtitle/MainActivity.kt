@@ -231,7 +231,7 @@ class MainActivity : AppCompatActivity() {
         val hasKey = keyOrEmpty().isNotEmpty()
         chip.setBackgroundResource(if (hasKey) R.drawable.bg_chip else R.drawable.bg_chip_warn)
         chipDot.setBackgroundResource(if (hasKey) R.drawable.dot_teal else R.drawable.dot_dim)
-        chipText.text = if (hasKey) "연결 준비 완료" else "API 키 필요"
+        chipText.text = if (hasKey) "API 키 입력됨" else "API 키 필요"
         chipText.setTextColor(ContextCompat.getColor(this, if (hasKey) R.color.teal else R.color.warn))
 
         val note = when {
@@ -451,7 +451,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.valueEngine).text = listOf("실시간 통역", "듣기 번역", "기본")[idx]
         val help = when (idx) {
             0 -> "가장 빠름. Gemini가 소리를 실시간으로 듣고 번역해요. 언어 자동 감지. 데이터를 많이 써요."
-            1 -> "2~4초 늦지만 정확해요. 소리를 문장 단위로 Gemini에 보내요. 언어 자동 감지."
+            1 -> "소리를 문장 단위로 Gemini에 보내 번역해요. 실시간보다 조금 늦게 나와요. 언어 자동 감지."
             else -> "폰 음성 인식 + Google 번역. 키가 있으면 Gemini가 문장을 다듬어요. 영상 언어를 골라야 해요."
         }
         val noKey = if (keyOrEmpty().isEmpty() && idx != 2) "\n⚠ API 키가 없어서 지금은 기본 방식으로 동작해요." else ""
