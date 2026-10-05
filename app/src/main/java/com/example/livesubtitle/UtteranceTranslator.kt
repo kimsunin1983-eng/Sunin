@@ -194,7 +194,7 @@ class UtteranceTranslator(
             out = runCatching { translateWithGoogle(src, from.code, to.code) }
                 .onFailure { Log.w(TAG, "Google translate failed", it) }
                 .getOrNull()
-                ?.takeIf { valid(it, src, toScript, fromScript) }
+                ?.takeIf { valid(it, src, toScript, fromScript, lastResort = true) }
         }
         if (closed) return
         if (out == null) {
@@ -210,10 +210,15 @@ class UtteranceTranslator(
      * 번역 결과 검사: 비어 있지 않고, 원문을 그대로 따라 쓰지 않았고, 상대 언어 글자로 되어 있어야 함.
      * 단, "OK", "iPhone", "Wi-Fi" 처럼 번역해도 표기가 같은 짧은 말은 같아도 통과시킴.
      */
-    private fun valid(out: String, src: String, toScript: String, fromScript: String): Boolean {
+    private fun valid(out: String, src: String, toScript: String, fromScript: String, lastResort: Boolean = false): Boolean {
         if (out.isBlank()) return false
         if (Scripts.normalize(out) == Scripts.normalize(src)) {
-            return TranslationChecks.permitsUnchanged(src)
+            if (TranslationChecks.permitsUnchanged(src)) return true
+            // 두 번역기가 모두 그대로 돌려준 한두 단어는 이름이거나 두 언어에서 같은 말로 봄
+            // (Marriott, Clark, 영어↔필리핀어의 "Taxi", 영어↔스페인어의 "No")
+            // 글자가 다른 언어쌍(영어→한국어)에서는 한 단어일 때만 허용
+            return lastResort && TranslationChecks.sharedWord(src) &&
+                (toScript == fromScript || !src.trim().contains(' '))
         }
         if (toScript != fromScript) {
             val s = Scripts.detect(out) ?: return false

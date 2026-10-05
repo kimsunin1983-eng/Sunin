@@ -691,6 +691,12 @@ class ConversationActivity : AppCompatActivity() {
     private var lastLiveOutputAt = 0L
     private val earTimeout = Runnable { if (ear == null) chooseEar(force = true) }
     private var liveTurnOpen = false
+    /**
+     * 안전장치: 서버의 종료 신호(turnComplete)가 오지 않은 채 4초 동안 아무것도 안 오면 그 말은 끝난 것으로 봄.
+     * 이게 없으면 다음 사람의 번역이 앞 말에 이어 붙어 앞 말과 같은 귀(엉뚱한 사람)로 나감.
+     * 검산·버리기는 하지 않음 (확인된 종료가 아니므로).
+     */
+    private val turnIdle = Runnable { if (liveTurnOpen) endLiveTurn(confirmed = false) }
     private var heldAudioBytes = 0
 
     /** NONE: 번역이 아닌 출력이라 버림 */
@@ -990,6 +996,8 @@ class ConversationActivity : AppCompatActivity() {
             main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
+        main.removeCallbacks(turnIdle)
+        main.postDelayed(turnIdle, 4000)
     }
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
@@ -1198,6 +1206,7 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun resetLiveTurn() {
         main.removeCallbacks(earTimeout)
+        main.removeCallbacks(turnIdle)
         liveIn.setLength(0)
         liveOut.setLength(0)
         heldAudio.clear()

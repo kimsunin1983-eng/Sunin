@@ -15,6 +15,8 @@ internal class LiveSpeechBuffer {
         var complete = false
         var claimed = false
         var usable = true
+        /** 앞 말의 번역이 나오는 도중에 시작된 소리인지 */
+        var duringTurn = false
     }
     private val preRoll = ArrayDeque<ByteArray>()
     private var preRollBytes = 0
@@ -28,8 +30,10 @@ internal class LiveSpeechBuffer {
         if (length <= 0) return
         while (waiting.isNotEmpty() && now - waiting.first.startedAt > MAX_AGE_MS) waiting.removeFirst()
         if (active == null && speech) {
-            if (turnOpen) ambiguous = true // another utterance began before this response ended
-            active = Clip(now).also { clip -> preRoll.forEach { clip.pcm.write(it) } }
+            active = Clip(now).also { clip ->
+                clip.duringTurn = turnOpen
+                preRoll.forEach { clip.pcm.write(it) }
+            }
             preRoll.clear()
             preRollBytes = 0
         }
@@ -48,9 +52,11 @@ internal class LiveSpeechBuffer {
             clip.speechBytes += length
             clip.silentBytes = 0
         } else clip.silentBytes += length
+        // 번역 도중에 다른 말이 시작됨 → 소리의 주인이 불분명. 단, 0.3초도 안 되는 잡음은 말로 치지 않음
+        if (clip.duringTurn && turnOpen && clip.speechBytes >= NOISE_BYTES) ambiguous = true
         if (clip.silentBytes >= END_SILENCE_BYTES) {
             clip.complete = true
-            if (!clip.claimed) {
+            if (!clip.claimed && clip.speechBytes >= NOISE_BYTES) { // 짧은 잡음은 발화로 세지 않음
                 waiting.addLast(clip)
                 if (waiting.size > 3) {
                     // Losing an utterance makes subsequent matching unsafe until the next response.
@@ -68,6 +74,7 @@ internal class LiveSpeechBuffer {
         val candidates = waiting.toList() + listOfNotNull(active?.takeUnless { it.claimed })
         selected = candidates.singleOrNull()?.takeIf { now - it.startedAt <= MAX_AGE_MS }
         ambiguous = selected == null
+        selected?.duringTurn = false // 이 번역의 주인으로 정해진 소리는 겹친 말로 세지 않음
         candidates.forEach { it.claimed = true }
         waiting.clear()
     }
@@ -102,6 +109,7 @@ internal class LiveSpeechBuffer {
         private const val PRE_ROLL_BYTES = 32000 * 3 / 10
         private const val END_SILENCE_BYTES = 32000 * 8 / 10
         private const val MIN_SPEECH_BYTES = 32000 / 10
+        private const val NOISE_BYTES = 32000 * 3 / 10
         private const val MAX_BYTES = 32000 * 30
         private const val MAX_AGE_MS = 30_000L
     }

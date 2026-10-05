@@ -124,6 +124,27 @@ class TranslationRegressionTest {
         assertTrue(pcm.any { it == 2.toByte() })
     }
 
+    @Test fun shortNoiseBeforeSpeechDoesNotBlockCorrection() {
+        val c = Capture()
+        c.feed(1, true); c.feed(8, false) // 0.1초 잡음
+        c.feed(5, true, 1); c.feed(8, false)
+        c.begin()
+        assertNotNull(c.buffer.finishTurn())
+    }
+
+    @Test fun shortNoiseDuringResponseDoesNotBlockCorrection() {
+        val c = Capture()
+        c.feed(5, true, 1); c.feed(8, false)
+        c.begin()
+        c.feed(2, true); c.feed(8, false) // 번역이 나오는 동안의 짧은 잡음
+        assertNotNull(c.buffer.finishTurn())
+    }
+
+    @Test fun namesAndSharedWordsSurviveOnlyAsLastResort() {
+        listOf("Marriott", "Taxi", "No", "Clark Marriott").forEach { assertTrue(it, TranslationChecks.sharedWord(it)) }
+        listOf("I am sick", "Do not pay", "I love you", "아니요").forEach { assertFalse(it, TranslationChecks.sharedWord(it)) }
+    }
+
     @Test fun silenceAloneNeverCreatesAnUtterance() {
         val c = Capture()
         c.feed(20, false)
