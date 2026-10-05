@@ -241,7 +241,7 @@ class UtteranceTranslator(
     private fun translateWithGoogle(text: String, from: String, to: String): String {
         val url = URL(
             "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
-                "&sl=" + from + "&tl=" + to + "&q=" + URLEncoder.encode(text, "UTF-8")
+                "&sl=" + googleCode(from) + "&tl=" + googleCode(to) + "&q=" + URLEncoder.encode(text, "UTF-8")
         )
         val conn = url.openConnection() as HttpURLConnection
         conn.connectTimeout = 4000
@@ -261,6 +261,9 @@ class UtteranceTranslator(
             conn.disconnect()
         }
     }
+
+    /** Google 번역은 필리핀어를 "tl"(타갈로그)로 부름 */
+    private fun googleCode(code: String) = if (code == "fil") "tl" else code
 
     // ───────────────────────── Gemini 호출 공통 ─────────────────────────
     private fun body(system: String, parts: JSONArray, config: JSONObject): JSONObject = JSONObject()

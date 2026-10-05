@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
         "태국어" to "th-TH",
         "인도네시아어" to "id-ID",
         "러시아어" to "ru-RU",
+        "필리핀어 (타갈로그)" to "fil-PH",
     )
 
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }

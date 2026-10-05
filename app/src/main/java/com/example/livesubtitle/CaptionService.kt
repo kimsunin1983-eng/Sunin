@@ -511,7 +511,7 @@ class CaptionService : Service() {
     private var lastPartialSent = ""
 
     private fun sourceLanguage(): String? =
-        TranslateLanguage.fromLanguageTag(langTag.substringBefore('-'))
+        TranslateLanguage.fromLanguageTag(langTag.substringBefore('-').let { if (it == "fil") "tl" else it })
 
     private fun translatorReadyOrNotNeeded() = true
 
@@ -695,7 +695,11 @@ class CaptionService : Service() {
     }
 
     private fun translateOnline(text: String): String {
-        val src = if (langTag.startsWith("zh")) langTag else langTag.substringBefore('-')
+        val src = when {
+            langTag.startsWith("zh") -> langTag
+            langTag.startsWith("fil") -> "tl"
+            else -> langTag.substringBefore('-')
+        }
         val url = URL(
             "https://translate.googleapis.com/translate_a/single?client=gtx&dt=t" +
                 "&sl=" + src + "&tl=ko&q=" + URLEncoder.encode(text, "UTF-8")

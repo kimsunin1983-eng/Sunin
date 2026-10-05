@@ -64,6 +64,7 @@ class ConversationActivity : AppCompatActivity() {
         Lang("태국어", "th", "Thai"),
         Lang("인도네시아어", "id", "Indonesian"),
         Lang("러시아어", "ru", "Russian"),
+        Lang("필리핀어 (타갈로그)", "fil", "Filipino (Tagalog)"),
     )
 
     /** 이어폰 한쪽을 낀 사람 */
@@ -758,7 +759,7 @@ class ConversationActivity : AppCompatActivity() {
      */
     private fun addBubble(speaker: Side, originalText: String, translatedText: String): Pair<TextView, TextView> {
         val badge = TextView(this).apply {
-            text = speaker.lang.code.substringBefore('-').uppercase().take(2)
+            text = if (speaker.lang.code == "fil") "TL" else speaker.lang.code.substringBefore('-').uppercase().take(2)
             textSize = 11f
             gravity = Gravity.CENTER
             setTextColor(ContextCompat.getColor(context, if (speaker.isLeft) R.color.teal else R.color.purple))
