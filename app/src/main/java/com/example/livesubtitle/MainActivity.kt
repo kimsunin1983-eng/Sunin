@@ -91,6 +91,11 @@ class MainActivity : AppCompatActivity() {
             }
         )
         findViewById<Button>(R.id.buttonDiagnose).setOnClickListener { runDiagnosis() }
+        findViewById<Button>(R.id.buttonConversation).setOnClickListener {
+            prefs.edit().putString("geminiKey", editKey.text.toString().trim()).apply()
+            if (CaptionService.isRunning) stopService(Intent(this, CaptionService::class.java))
+            startActivity(Intent(this, ConversationActivity::class.java))
+        }
 
         spinner.adapter = ArrayAdapter(
             this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first }

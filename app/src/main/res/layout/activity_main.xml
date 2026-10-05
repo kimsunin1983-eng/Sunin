@@ -137,6 +137,14 @@
             android:text="자막 시작"
             android:textSize="17sp" />
 
+        <Button
+            android:id="@+id/buttonConversation"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="8dp"
+            android:text="대화 통역 (이어폰 한쪽씩)"
+            android:textSize="17sp" />
+
         <TextView
             android:id="@+id/textInfo"
             android:layout_width="match_parent"

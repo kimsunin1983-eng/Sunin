@@ -33,6 +33,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ConversationActivity"
+            android:exported="false"
+            android:label="대화 통역" />
+
         <service
             android:name=".CaptionService"
             android:exported="false"

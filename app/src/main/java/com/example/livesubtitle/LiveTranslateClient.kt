@@ -30,6 +30,10 @@ class LiveTranslateClient(
     /** translationConfig 를 generationConfig 안에 넣을지(true), setup 바로 아래에 넣을지(false) */
     private val translationInGenerationConfig: Boolean,
     private val listener: Listener,
+    /** 번역해서 내보낼 언어 코드 (ko, en, ja …) */
+    private val targetLanguage: String = "ko",
+    /** true: 이미 그 언어로 말한 것도 그대로 따라 말함, false: 조용히 있음 */
+    private val echoTarget: Boolean = true,
 ) {
     interface Listener {
         fun onReady()
@@ -38,6 +42,10 @@ class LiveTranslateClient(
         fun onTurnComplete()
         /** error == null 이면 정상 종료. gotOutput: 이 연결에서 번역을 한 번이라도 받았는지 */
         fun onClosed(error: String?, gotOutput: Boolean)
+        /** 번역된 음성 (24kHz 16bit mono PCM). 자막만 쓸 때는 무시 */
+        fun onAudio(pcm: ByteArray) {}
+        /** 방금 들은 말의 언어 코드 (서버가 알려 줄 때만) */
+        fun onInputLanguage(code: String) {}
     }
 
     private val http = OkHttpClient.Builder()
@@ -83,7 +91,8 @@ class LiveTranslateClient(
         })
     }
 
-    private fun setupMessage(): String = buildSetup(translationInGenerationConfig).toString()
+    private fun setupMessage(): String =
+        buildSetup(translationInGenerationConfig, targetLanguage, echoTarget).toString()
 
     private fun handle(text: String) {
         val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -100,8 +109,17 @@ class LiveTranslateClient(
             return
         }
         val content = msg.optJSONObject("serverContent") ?: return
-        content.optJSONObject("inputTranscription")?.optString("text")?.let {
-            if (it.isNotEmpty()) listener.onInputText(it)
+        content.optJSONObject("inputTranscription")?.let { t ->
+            t.optString("languageCode").let { if (it.isNotEmpty()) listener.onInputLanguage(it) }
+            t.optString("text").let { if (it.isNotEmpty()) listener.onInputText(it) }
+        }
+        content.optJSONObject("modelTurn")?.optJSONArray("parts")?.let { parts ->
+            for (i in 0 until parts.length()) {
+                val data = parts.optJSONObject(i)?.optJSONObject("inlineData")?.optString("data").orEmpty()
+                if (data.isNotEmpty()) {
+                    runCatching { Base64.decode(data, Base64.DEFAULT) }.getOrNull()?.let { listener.onAudio(it) }
+                }
+            }
         }
         content.optJSONObject("outputTranscription")?.optString("text")?.let {
             if (it.isNotEmpty()) {
@@ -139,10 +157,14 @@ class LiveTranslateClient(
         const val MODEL = "gemini-3.5-live-translate-preview"
 
         /** 받아쓰기(input/outputAudioTranscription)는 setup 바로 아래 항목 */
-        fun buildSetup(translationInGenerationConfig: Boolean): JSONObject {
+        fun buildSetup(
+            translationInGenerationConfig: Boolean,
+            targetLanguage: String = "ko",
+            echoTarget: Boolean = true,
+        ): JSONObject {
             val translation = JSONObject()
-                .put("targetLanguageCode", "ko")
-                .put("echoTargetLanguage", true) // 한국어 대사는 그대로
+                .put("targetLanguageCode", targetLanguage)
+                .put("echoTargetLanguage", echoTarget)
             val generationConfig = JSONObject()
                 .put("responseModalities", org.json.JSONArray().put("AUDIO"))
             val setup = JSONObject()
