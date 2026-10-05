@@ -67,12 +67,21 @@ class ConversationActivity : AppCompatActivity() {
         var ready = false
         val finalizeRunnable = Runnable { finalizeLine(this) }
 
-        /** 이번 말(턴)을 이쪽 귀에 틀지 여부. null = 아직 판단 전 */
-        @Volatile var muteTurn: Boolean? = null
-        @Volatile var lastOutputAt = 0L
-        @Volatile var turnStartAt = 0L
+        // ── 한 번의 말(턴) 단위 판단: 모든 접근은 메인 스레드 ──
+        /** 이 연결이 받아쓴 원문 조각 (도착 시각, 글자) */
+        val heard = ArrayList<Pair<Long, String>>()
+        var turn = Turn.NONE
+        var turnStartAt = 0L
+        var prevTurnStartAt = 0L
+        var lastOutputAt = 0L
+        val pendingAudio = ArrayList<ByteArray>()
+        val pendingText = StringBuilder()
+        val decideTimeout = Runnable { decide(this, force = true) }
         val script get() = scriptOfLanguage(langCode)
     }
+
+    /** NONE: 말 없음, UNDECIDED: 누구 말인지 확인 중(소리를 붙잡아 둠), PLAY: 틀어 줌, MUTE: 막음 */
+    private enum class Turn { NONE, UNDECIDED, PLAY, MUTE }
 
     private val left = Side("왼쪽", true)
     private val right = Side("오른쪽", false)
@@ -158,15 +167,19 @@ class ConversationActivity : AppCompatActivity() {
             return
         }
         running = true
-        heardScript = null
-        synchronized(heardText) { heardText.setLength(0) }
+        recentPlayed.clear()
         history.clear()
         sides.forEach { side ->
             side.failures = 0
             side.ready = false
             side.lastInputLang = ""
-            side.muteTurn = null
+            side.heard.clear()
+            side.turn = Turn.NONE
+            side.turnStartAt = 0L
+            side.prevTurnStartAt = 0L
             side.lastOutputAt = 0L
+            side.pendingAudio.clear()
+            side.pendingText.setLength(0)
             side.current.setLength(0)
             side.track = newTrack().also { it.play() }
             side.player = Executors.newSingleThreadExecutor()
@@ -291,35 +304,45 @@ class ConversationActivity : AppCompatActivity() {
                     }
                 }
 
-                override fun onInputText(delta: String) {
-                    noteHeard(delta)
+                override fun onInputText(delta: String) = ui {
+                    if (side.client !== client) return@ui
+                    side.heard += android.os.SystemClock.elapsedRealtime() to delta
+                    while (side.heard.size > 200) side.heard.removeAt(0)
+                    if (side.turn == Turn.UNDECIDED) decide(side, force = false)
                 }
 
                 override fun onInputLanguage(code: String) {
                     side.lastInputLang = code
                 }
 
-                override fun onAudio(pcm: ByteArray) {
-                    if (!running || side.client !== client || shouldMute(side)) return
-                    val stereo = toOneEar(pcm, side.isLeft)
-                    val track = side.track ?: return
-                    runCatching { side.player?.execute { runCatching { track.write(stereo, 0, stereo.size) } } }
+                override fun onAudio(pcm: ByteArray) = ui {
+                    if (!running || side.client !== client) return@ui
+                    onOutput(side)
+                    when (side.turn) {
+                        Turn.PLAY -> play(side, pcm)
+                        Turn.UNDECIDED -> side.pendingAudio += pcm
+                        else -> {}
+                    }
                 }
 
                 override fun onOutputText(delta: String) = ui {
                     if (side.client !== client) return@ui
                     side.failures = 0
-                    if (shouldMute(side) || looksLikeEcho(side, delta)) return@ui
-                    side.current.append(delta)
-                    renderLog()
-                    main.removeCallbacks(side.finalizeRunnable)
-                    main.postDelayed(side.finalizeRunnable, 2500)
+                    onOutput(side)
+                    when (side.turn) {
+                        Turn.PLAY -> showText(side, delta)
+                        Turn.UNDECIDED -> {
+                            side.pendingText.append(delta)
+                            decide(side, force = false)
+                        }
+                        else -> {}
+                    }
                 }
 
                 override fun onTurnComplete() = ui {
                     if (side.client === client) {
                         finalizeLine(side)
-                        side.muteTurn = null // 다음 말은 새로 판단
+                        endTurn(side)
                     }
                 }
 
@@ -344,75 +367,107 @@ class ConversationActivity : AppCompatActivity() {
             },
             targetLanguage = side.langCode,
             // false 로 두면 모델이 번역 대신 대답을 지어내는 일이 있어 true(따라 말하기)로 두고,
-            // 따라 말한 소리는 앱이 shouldMute 로 막는다
+            // 따라 말한 소리는 앱이 누구 말인지 판단해서 막는다 (judge)
             echoTarget = true,
         )
         side.client = client
         client.connect()
     }
 
-    // ── 누가 말했는지 판단: 받아쓰기 글자로 언어를 알아내 그 언어 쪽 귀는 막음 ──
-    @Volatile private var heardScript: String? = null
-    private val heardText = StringBuilder()
+    // ───────────────────────── 누구 말인지 판단 ─────────────────────────
+    // 번역 모델은 같은 언어를 들으면 그대로 따라 말한다. 그래서 소리가 오면 바로 틀지 않고
+    // 받아쓰기가 올 때까지 잠깐 붙잡아 둔 뒤, 이쪽 사람이 한 말이면 버리고 상대 말이면 튼다.
 
-    /** 두 연결 모두 같은 소리를 받아쓰므로 어느 쪽에서 와도 됨 */
-    private fun noteHeard(delta: String) {
-        detectScript(delta)?.let { heardScript = it }
-        synchronized(heardText) {
-            heardText.append(delta)
-            if (heardText.length > 400) heardText.delete(0, heardText.length - 400)
-        }
-    }
+    /** 방금 이어폰으로 틀어 준 문장들 (시각, 정규화한 글자) — 마이크가 그 소리를 다시 들었는지 확인용 */
+    private val recentPlayed = ArrayList<Pair<Long, String>>()
 
-    /**
-     * 이번 말을 이쪽 귀에 틀지 말지.
-     * 말이 시작되고 1.5초 동안은 받아쓰기가 도착하는 대로 판단을 고치고,
-     * 그 뒤로는 고정해서 상대가 끼어들어도 번역이 중간에 끊기지 않게 함.
-     */
-    private fun shouldMute(side: Side): Boolean {
+    /** 번역 소리/글자가 도착할 때마다 호출: 새 말의 시작이면 판단 대기 상태로 */
+    private fun onOutput(side: Side) {
         val now = android.os.SystemClock.elapsedRealtime()
-        // 1.2초 넘게 조용했으면 새 말로 봄
-        if (now - side.lastOutputAt > 1200) {
-            side.muteTurn = null
+        if (side.turn == Turn.NONE || now - side.lastOutputAt > 1200) {
+            if (side.turn != Turn.NONE) endTurn(side)
+            side.turn = Turn.UNDECIDED
+            side.prevTurnStartAt = side.turnStartAt
             side.turnStartAt = now
+            main.postDelayed(side.decideTimeout, 1500) // 받아쓰기가 끝내 안 오면 그냥 틂
+            side.lastOutputAt = now
+            decide(side, force = false)
+            return
         }
         side.lastOutputAt = now
-        val locked = side.muteTurn
-        if (locked != null && now - side.turnStartAt > 1500) return locked
-
-        val decided = decideMute(side) ?: locked ?: false
-        side.muteTurn = decided
-        return decided
     }
 
-    /** true: 이쪽 사람이 직접 한 말(막음), false: 상대 말(번역을 틀어 줌), null: 아직 모름 */
-    private fun decideMute(side: Side): Boolean? {
-        // (1) 서버가 알려 준 언어 코드
-        val code = side.lastInputLang.lowercase().substringBefore('-')
-        if (code.isNotEmpty()) return code == side.langCode.lowercase().substringBefore('-')
-        // (2) 받아쓰기 글자의 종류 (한글/가나/한자/라틴…)
-        val other = if (side.isLeft) right else left
-        val heard = heardScript ?: return null
-        if (side.script == other.script) return null // 글자로는 구분 불가 → looksLikeEcho 가 처리
-        return heard == side.script || (heard == "han" && side.script == "ja" && other.script != "han")
+    private fun endTurn(side: Side) {
+        main.removeCallbacks(side.decideTimeout)
+        side.turn = Turn.NONE
+        side.pendingAudio.clear()
+        side.pendingText.setLength(0)
     }
 
-    /** 글자 종류가 같은 언어끼리(영어↔스페인어 등): 번역문이 들은 말과 거의 같으면 따라 말한 것 */
-    private fun looksLikeEcho(side: Side, delta: String): Boolean {
-        val other = if (side.isLeft) right else left
-        if (side.script != other.script) return false
-        val out = normalize(side.current.toString() + delta)
-        if (out.length < 10) return false
-        val heard = synchronized(heardText) { normalize(heardText.toString()) }
-        if (heard.contains(out)) {
-            side.muteTurn = true
-            side.current.setLength(0)
-            return true
+    private fun decide(side: Side, force: Boolean) {
+        if (side.turn != Turn.UNDECIDED) return
+        val verdict = judge(side) ?: if (force) Turn.PLAY else return
+        main.removeCallbacks(side.decideTimeout)
+        side.turn = verdict
+        if (verdict == Turn.PLAY) {
+            side.pendingAudio.forEach { play(side, it) }
+            if (side.pendingText.isNotEmpty()) showText(side, side.pendingText.toString())
         }
-        return false
+        side.pendingAudio.clear()
+        side.pendingText.setLength(0)
+    }
+
+    /** PLAY: 상대 말 → 번역을 틀어 줌, MUTE: 본인 말이거나 메아리 → 버림, null: 아직 모름 */
+    private fun judge(side: Side): Turn? {
+        val other = if (side.isLeft) right else left
+        // 이번 말의 원문 = 직전 말이 시작된 뒤에 받아쓴 것
+        val heardNow = side.heard.filter { it.first > side.prevTurnStartAt }
+        val heardText = heardNow.joinToString("") { it.second }
+        val heardNorm = normalize(heardText)
+        if (heardNorm.isEmpty()) return null
+
+        // (1) 메아리: 이어폰으로 틀고 있는(또는 방금 다 튼) 문장을 마이크가 다시 들음.
+        //     사람이 같은 말로 대답하는 경우와 구분하려고, 재생이 끝난 지 1초 안에 들린 것만 메아리로 봄.
+        val now = android.os.SystemClock.elapsedRealtime()
+        val heardAt = heardNow.first().first
+        recentPlayed.removeAll { now - it.first > 8000 }
+        val playing = sides.map { normalize(it.current.toString()) }
+        val justPlayed = recentPlayed.filter { heardAt < it.first + 1000 }.map { it.second }
+        if ((playing + justPlayed).any { sameWords(it, heardNorm) }) return Turn.MUTE
+
+        // (2) 글자 종류로 말한 언어 판단 (한글/가나/한자/라틴…)
+        val heardScript = detectScript(heardText) ?: return null
+        val mine = heardScript == side.script ||
+            (heardScript == "han" && side.script == "ja" && other.script != "han")
+        if (!mine) return Turn.PLAY
+        if (side.script != other.script) return Turn.MUTE
+
+        // (3) 두 언어의 글자 종류가 같을 때(영어↔스페인어 등): 번역문이 원문과 같으면 따라 말한 것
+        val outNorm = normalize(side.pendingText.toString())
+        if (outNorm.length < 6) return null
+        return if (heardNorm.contains(outNorm) || outNorm.contains(heardNorm)) Turn.MUTE else Turn.PLAY
+    }
+
+    private fun play(side: Side, pcm: ByteArray) {
+        val track = side.track ?: return
+        val stereo = toOneEar(pcm, side.isLeft)
+        runCatching { side.player?.execute { runCatching { track.write(stereo, 0, stereo.size) } } }
+    }
+
+    private fun showText(side: Side, delta: String) {
+        side.current.append(delta)
+        renderLog()
+        main.removeCallbacks(side.finalizeRunnable)
+        main.postDelayed(side.finalizeRunnable, 2500)
     }
 
     private fun normalize(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
+
+    private fun sameWords(a: String, b: String): Boolean {
+        if (a.isEmpty() || b.isEmpty()) return false
+        if (a == b) return true
+        return a.length >= 4 && b.length >= 4 && (a.contains(b) || b.contains(a))
+    }
 
     private fun detectScript(text: String): String? {
         var ko = 0; var kana = 0; var han = 0; var latin = 0; var cyr = 0; var thai = 0
@@ -437,6 +492,7 @@ class ConversationActivity : AppCompatActivity() {
         val text = side.current.toString().trim()
         side.current.setLength(0)
         if (text.isNotEmpty()) {
+            recentPlayed += side.lastOutputAt to normalize(text) // 마지막 소리가 온 시각 기준
             history += lineOf(side, text)
             while (history.size > 60) history.removeAt(0)
         }
