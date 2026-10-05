@@ -159,7 +159,10 @@ class TranslationRegressionTest {
             }
             assertTrue(oldStarted.await(2, TimeUnit.SECONDS))
             old.shutdownNow()
-            fresh.execute { freshStarted.countDown(); freshRelease.await() }
+            fresh.execute {
+                freshStarted.countDown()
+                try { freshRelease.await() } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            }
             assertTrue(freshStarted.await(2, TimeUnit.SECONDS))
             fresh.execute { }
             fresh.execute { }

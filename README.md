@@ -67,3 +67,9 @@ app/src/main/java/com/example/livesubtitle/
   Diagnostics.kt             연결 진단
   WaveView.kt                마이크 물결 표시
 ```
+
+## v7.6 검산 안정성 개선
+
+실시간 문장 종료는 서버의 완료 신호로 판단합니다. 검산은 한 발화의 완성된 음성이 대응할 때만 수행하며, 겹치거나 잘린 음성으로 기존 번역을 자동 교체하지 않습니다. 긴 번역은 양쪽 전체 문장을 비교합니다.
+
+수정 범위와 실기기 확인 항목은 [v7.6 검증 문서](docs/v7.6-validation.md)를 참고하세요. 자동 회귀 검증은 `gradle testDebugUnitTest assembleDebug`로 실행합니다.
