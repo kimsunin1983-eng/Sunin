@@ -139,6 +139,9 @@ class LiveTranslateClient(
         ws?.send("{\"realtimeInput\":{\"audio\":{\"data\":\"$b64\",\"mimeType\":\"audio/pcm;rate=16000\"}}}")
     }
 
+    /** 설정이 끝나 소리를 받을 준비가 됐는지 */
+    val isReady: Boolean get() = ready && !closed.get()
+
     fun close() {
         ready = false
         runCatching { ws?.close(1000, "bye") }

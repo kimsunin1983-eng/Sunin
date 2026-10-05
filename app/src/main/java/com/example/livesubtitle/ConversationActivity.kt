@@ -69,6 +69,10 @@ class ConversationActivity : AppCompatActivity() {
         val current = StringBuilder()
         var failures = 0
         var ready = false
+        /** 말이 끝나 연결을 새로 맺는 중 (화면에는 계속 '연결됨'으로 표시) */
+        var renewing = false
+        /** 이 연결에 마지막으로 보낸 마이크 조각 번호 */
+        @Volatile var sentSeq = 0L
         val finalizeRunnable = Runnable { finalizeLine(this) }
 
         // 화면: 이쪽 카드의 제목·상태, 지금 쓰고 있는 말풍선
@@ -219,6 +223,8 @@ class ConversationActivity : AppCompatActivity() {
         sides.forEach { side ->
             side.failures = 0
             side.ready = false
+            side.renewing = false
+            side.sentSeq = micSeq
             side.lastInputLang = ""
             side.heard.clear()
             side.turn = Turn.NONE
@@ -239,6 +245,8 @@ class ConversationActivity : AppCompatActivity() {
         spinnerRight.isEnabled = false
         setTalkButton(active = true)
         updateStatus()
+        dirty = false
+        main.postDelayed(watchdog, 300)
     }
 
     private fun setTalkButton(active: Boolean) {
@@ -264,7 +272,7 @@ class ConversationActivity : AppCompatActivity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         spinnerLeft.isEnabled = true
         spinnerRight.isEnabled = true
-        sides.forEach { it.ready = false }
+        sides.forEach { it.ready = false; it.renewing = false }
         setTalkButton(active = false)
         wave.clear()
         updateStatus()
@@ -299,15 +307,52 @@ class ConversationActivity : AppCompatActivity() {
                 while (micActive) {
                     val n = r.read(buf, 0, buf.size)
                     if (n <= 0 || !running) continue
-                    wave.push(level(buf, n))
-                    left.client?.sendAudio(buf, n)
-                    right.client?.sendAudio(buf, n)
+                    val lv = level(buf, n)
+                    wave.push(lv)
+
+                    // 말소리 구간 추적: 0.4초 이상 조용하다가 다시 소리가 나면 새 말의 시작
+                    val seq = micSeq + 1
+                    if (lv > SPEECH_LEVEL) {
+                        if (silentChunks >= 4) {
+                            burstStartSeq = maxOf(0L, seq - 3) // 앞머리 0.2초 포함
+                            burstStartAt = android.os.SystemClock.elapsedRealtime()
+                        }
+                        silentChunks = 0
+                    } else {
+                        silentChunks++
+                    }
+                    synchronized(micLog) {
+                        micLog.addLast(seq to buf.copyOf(n))
+                        while (micLog.size > 80) micLog.removeFirst() // 최근 8초
+                    }
+                    micSeq = seq
+                    pump(left)
+                    pump(right)
                 }
             }
             true
         }
     } catch (e: Exception) {
         false
+    }
+
+    // 최근 마이크 소리 (번호, PCM). 연결을 새로 맺는 틈에 말한 소리를 잃지 않기 위해 보관
+    private val micLog = java.util.ArrayDeque<Pair<Long, ByteArray>>()
+    @Volatile private var micSeq = 0L
+    @Volatile private var silentChunks = 100
+    @Volatile private var burstStartSeq = 0L
+    @Volatile private var burstStartAt = 0L
+
+    /** 연결이 준비됐으면 아직 안 보낸 소리를 순서대로 보냄 (마이크 스레드) */
+    private fun pump(side: Side) {
+        val c = side.client ?: return
+        if (!c.isReady) return
+        val from = side.sentSeq
+        val todo = synchronized(micLog) { micLog.filter { it.first > from } }
+        for ((seq, pcm) in todo) {
+            c.sendAudio(pcm, pcm.size)
+            side.sentSeq = seq
+        }
     }
 
     /** 소리 크기를 0~1 로 (물결 표시용) */
@@ -370,6 +415,7 @@ class ConversationActivity : AppCompatActivity() {
                 override fun onReady() = ui {
                     if (side.client === client) {
                         side.ready = true
+                        side.renewing = false
                         updateStatus()
                     }
                 }
@@ -411,6 +457,7 @@ class ConversationActivity : AppCompatActivity() {
 
                 override fun onTurnComplete() = ui {
                     if (side.client === client) {
+                        decide(side, force = true) // 아직 판단 전이면 버리지 말고 틂
                         finalizeLine(side)
                         endTurn(side)
                     }
@@ -420,6 +467,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (!running || side.client !== client) return@ui
                     side.client = null
                     side.ready = false
+                    side.renewing = false
                     finalizeLine(side)
                     if (gotOutput || error == null || error == "goAway") {
                         // 서버 세션 시간 제한 등 → 바로 다시 연결
@@ -459,12 +507,61 @@ class ConversationActivity : AppCompatActivity() {
             side.turn = Turn.UNDECIDED
             side.prevTurnStartAt = side.turnStartAt
             side.turnStartAt = now
+            if (!dirty) {
+                dirty = true
+                dirtySince = now
+            }
             main.postDelayed(side.decideTimeout, 1500) // 받아쓰기가 끝내 안 오면 그냥 틂
             side.lastOutputAt = now
             decide(side, force = false)
             return
         }
         side.lastOutputAt = now
+    }
+
+    // ── 말이 끝날 때마다 연결을 새로 맺기 ──
+    // 번역 모델은 연결 후 처음 들은 언어에 맞춰져서, 뒤에 다른 언어가 와도 처음 언어로 알아듣는다.
+    // 그래서 한 사람의 말(과 그 번역)이 끝나면 두 연결을 새로 맺어 다음 말의 언어를 처음부터 알아내게 한다.
+    private var dirty = false
+    private var dirtySince = 0L
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            // 번역이 1.3초 넘게 더 안 오면 그 말은 끝난 것으로 봄
+            sides.forEach { s ->
+                if (s.turn != Turn.NONE && now - s.lastOutputAt > 1300) {
+                    decide(s, force = true)
+                    finalizeLine(s)
+                    endTurn(s)
+                }
+            }
+            val lastOutput = maxOf(left.lastOutputAt, right.lastOutputAt)
+            if (dirty && sides.all { it.turn == Turn.NONE } && now - lastOutput > 400) renewSessions()
+            main.postDelayed(this, 300)
+        }
+    }
+
+    private fun renewSessions() {
+        dirty = false
+        // 번역이 나오기 시작한 뒤에 시작된 말소리는 다음 사람의 말 → 새 연결에 처음부터 다시 들려줌.
+        // 그 전부터 이어지던 말소리는 이미 번역된 것이므로 다시 보내지 않음.
+        val speakingNow = silentChunks < 4
+        val resume = if (speakingNow && burstStartAt > dirtySince) burstStartSeq - 1 else micSeq
+        sides.forEach { side ->
+            val old = side.client
+            side.client = null
+            side.ready = false
+            side.renewing = true
+            runCatching { old?.close() }
+            side.heard.clear()
+            side.lastInputLang = ""
+            side.turnStartAt = 0L
+            side.prevTurnStartAt = 0L
+            side.sentSeq = resume
+            connect(side)
+        }
     }
 
     private fun endTurn(side: Side) {
@@ -653,14 +750,14 @@ class ConversationActivity : AppCompatActivity() {
         sides.forEach { s ->
             s.stateView.text = when {
                 !running -> "● 대기 중"
-                s.ready -> "● 연결됨"
+                s.ready || s.renewing -> "● 연결됨"
                 else -> "● 연결 중…"
             }
-            s.stateView.setTextColor(if (running && s.ready) teal else dim)
+            s.stateView.setTextColor(if (running && (s.ready || s.renewing)) teal else dim)
         }
         chipWarn.visibility = if (headphonesConnected()) View.GONE else View.VISIBLE
         if (running) {
-            status.text = if (sides.all { it.ready }) "상대방의 말을 듣고 있어요" else "연결하고 있어요…"
+            status.text = if (sides.all { it.ready || it.renewing }) "상대방의 말을 듣고 있어요" else "연결하고 있어요…"
         }
     }
 
@@ -695,5 +792,7 @@ class ConversationActivity : AppCompatActivity() {
     companion object {
         private const val IN_RATE = 16000
         private const val OUT_RATE = 24000
+        /** 이 크기(0~1)를 넘으면 말소리로 봄 */
+        private const val SPEECH_LEVEL = 0.12f
     }
 }
