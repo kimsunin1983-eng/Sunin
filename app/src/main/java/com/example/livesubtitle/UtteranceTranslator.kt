@@ -101,6 +101,11 @@ class UtteranceTranslator(
         }
     }
 
+    /** 이미 잘라 둔 한 문장 분량의 소리를 바로 통역 (실시간 모델이 놓친 말을 되살릴 때 씀) */
+    fun submitClip(pcm: ByteArray) {
+        if (!closed) submit(pcm)
+    }
+
     private fun submit(pcm: ByteArray) {
         listener.onPending(pending.incrementAndGet())
         worker.execute {

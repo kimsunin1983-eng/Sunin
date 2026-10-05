@@ -313,6 +313,8 @@ class ConversationActivity : AppCompatActivity() {
         player = null
         runCatching { track?.pause(); track?.flush(); track?.release() }
         track = null
+        runCatching { rescue?.close() }
+        rescue = null
         runCatching { fixExecutor?.shutdownNow() }
         fixExecutor = null
         transcriber = null
@@ -560,13 +562,17 @@ class ConversationActivity : AppCompatActivity() {
     private var hearing = false
     private var waiting = 0
 
-    private fun startSteady() {
+    private fun ensureTts() {
         if (tts == null) {
             tts = TextToSpeech(applicationContext) { result ->
                 ttsReady = result == TextToSpeech.SUCCESS
                 if (!ttsReady) ui { toast("이 폰의 음성 합성(TTS)을 쓸 수 없어요. 번역은 화면 글자로만 보여요.") }
             }
         }
+    }
+
+    private fun startSteady() {
+        ensureTts()
         // A = 왼쪽 사람의 언어, B = 오른쪽 사람의 언어
         utterance = UtteranceTranslator(
             apiKey,
@@ -644,7 +650,8 @@ class ConversationActivity : AppCompatActivity() {
     private val earTimeout = Runnable { if (ear == null) chooseEar(force = true) }
     private val turnIdle = Runnable { endLiveTurn() }
 
-    private enum class Ear { LEFT, RIGHT, BOTH }
+    /** NONE: 번역이 아닌 출력이라 버림 */
+    private enum class Ear { LEFT, RIGHT, BOTH, NONE }
 
     /** 시도할 연결 설정 조합. 서버가 거절하면 다음 것으로, 성공한 것을 기억해 다음에 먼저 씀 */
     private data class Variant(val model: String, val vad: Boolean, val affective: Boolean)
@@ -712,6 +719,32 @@ class ConversationActivity : AppCompatActivity() {
         liveVariant = prefs.getInt(variantKey(), 0).coerceIn(0, liveVariants.lastIndex)
         track = newTrack().also { it.play() }
         player = Executors.newSingleThreadExecutor()
+        // 두 언어가 정해져 있으면, 실시간 모델이 놓친 말을 되살릴 통역기를 준비
+        rescue = null
+        if (left.lang.code != AUTO && right.lang.code != AUTO) {
+            ensureTts()
+            rescue = UtteranceTranslator(
+                apiKey,
+                UtteranceTranslator.Language(left.lang.english, left.lang.code),
+                UtteranceTranslator.Language(right.lang.english, right.lang.code),
+                object : UtteranceTranslator.Listener {
+                    override fun onSpeaking(speaking: Boolean) {}
+                    override fun onPending(count: Int) {}
+                    override fun onError(message: String, fatal: Boolean) {}
+                    override fun onResult(speakerIsA: Boolean, src: String, out: String) = ui {
+                        if (!running || !fastMode) return@ui
+                        val speaker = if (speakerIsA) left else right
+                        addBubble(speaker, src, out)
+                        if (speakerMode) {
+                            if (!speaker.isLeft) textFacing.text = out // 내가 한 말 → 상대가 읽게
+                            else speak(out, right)                      // 상대가 한 말 → 내 이어폰
+                        } else {
+                            speak(out, other(speaker))
+                        }
+                    }
+                }
+            )
+        }
         transcriber = Transcriber(apiKey)
         fixExecutor = Executors.newSingleThreadExecutor()
         synchronized(talkLog) { talkLog.clear() }
@@ -827,6 +860,11 @@ class ConversationActivity : AppCompatActivity() {
                     liveFailures = 0
                     touchLiveTurn()
                     liveOut.append(delta)
+                    if (ear == Ear.NONE) return@ui
+                    if (isPlaceholder(liveOut.toString())) {
+                        dropTurn()
+                        return@ui
+                    }
                     if (ear == null) chooseEar(force = false) else renderLiveBubble()
                 }
 
@@ -897,6 +935,7 @@ class ConversationActivity : AppCompatActivity() {
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
     private fun chooseEar(force: Boolean) {
+        if (ear == Ear.NONE) return
         val script = detectScript(liveOut.toString())
         val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
         val chosen = when {
@@ -930,6 +969,7 @@ class ConversationActivity : AppCompatActivity() {
         val text = liveOut.toString().trim()
         if (text.isEmpty()) return
         val e = ear ?: return
+        if (e == Ear.NONE) return
         // 번역을 듣는 사람의 반대쪽이 말한 사람
         val speaker = if (e == Ear.LEFT) right else left
         val views = liveBubble ?: addBubble(speaker, "", "").also { liveBubble = it }
@@ -960,10 +1000,43 @@ class ConversationActivity : AppCompatActivity() {
     /** 최근 대화 (말한 언어 → 번역). 연결을 새로 맺을 때 넘겨줘서 맥락이 끊기지 않게 함 */
     private val recentTurns = java.util.ArrayDeque<String>()
 
+    // ── 번역이 아닌 출력 걸러내기 + 놓친 말 되살리기 ──
+    /** 모델이 번역 대신 내보내는 표시 문구인지 (예: "<no speech detected>", "[silence]") */
+    private fun isPlaceholder(text: String): Boolean {
+        val t = text.trim().lowercase()
+        if (t.isEmpty()) return false
+        if (t.startsWith("<") || t.startsWith("[")) return true
+        return PLACEHOLDER.containsMatchIn(t)
+    }
+
+    /** 문장 단위 방식 통역기. 실시간 모델이 말을 놓쳤을 때 그 소리를 한 번 더 통역하는 데 씀 */
+    private var rescue: UtteranceTranslator? = null
+
+    /** 이번 턴은 번역이 아님: 소리도 말풍선도 내보내지 않고, 그 말은 문장 단위 방식으로 다시 통역 */
+    private fun dropTurn() {
+        liveBubble?.let { views ->
+            val row = views.second.parent?.parent as? View
+            if (row != null) bubbles.removeView(row)
+        }
+        liveBubble = null
+        heldAudio.clear()
+        main.removeCallbacks(earTimeout)
+        ear = Ear.NONE
+
+        val end = turnFirstOutputAt
+        val start = maxOf(prevFirstOutputAt, end - 15_000)
+        val pcm = synchronized(talkLog) {
+            val out = java.io.ByteArrayOutputStream()
+            talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
+            out.toByteArray()
+        }
+        if (pcm.size >= 32 * 500) rescue?.submitClip(pcm) // 0.5초 이상일 때만
+    }
+
     private fun rememberTurn() {
         val e = ear ?: return
         val out = liveOut.toString().trim()
-        if (out.isEmpty() || e == Ear.BOTH) return
+        if (out.isEmpty() || e == Ear.BOTH || e == Ear.NONE) return
         val speaker = if (e == Ear.LEFT) right else left
         val listener = other(speaker)
         val original = liveIn.toString().trim().takeIf { originalLooksRight(it, speaker, e) }
@@ -980,7 +1053,7 @@ class ConversationActivity : AppCompatActivity() {
     private fun refineOriginal() {
         val views = liveBubble ?: return
         val e = ear ?: return
-        if (e == Ear.BOTH) return
+        if (e == Ear.BOTH || e == Ear.NONE) return
         val speaker = if (e == Ear.LEFT) right else left
         if (speaker.lang.code == AUTO) return
 
@@ -1095,6 +1168,7 @@ class ConversationActivity : AppCompatActivity() {
      * - 스피커 방식: 상대(왼쪽)에게 가는 번역은 폰 스피커로, 나(오른쪽)에게 오는 번역은 이어폰 양쪽으로
      */
     private fun play(mono: ByteArray, e: Ear) {
+        if (e == Ear.NONE) return
         val now = SystemClock.elapsedRealtime()
         lastPlayAt = now
         if (speakerMode) {
@@ -1271,6 +1345,7 @@ class ConversationActivity : AppCompatActivity() {
 
     companion object {
         private const val AUTO = "auto"
+        private val PLACEHOLDER = Regex("^\\(?(no speech|no audio|silence|inaudible|unintelligible|noise|music|background)")
 
         /** (화면 이름, 모델에 알려 줄 설명) */
         private val SITUATIONS = listOf(
