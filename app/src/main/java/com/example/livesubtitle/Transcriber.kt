@@ -18,7 +18,10 @@ class Transcriber(private val apiKey: String) {
     private val noThinking = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** pcm: 16kHz 16bit mono. 실패하거나 말소리가 없으면 null */
-    fun transcribe(pcm: ByteArray, languageEnglish: String): String? {
+    /**
+     * hint: 통역 모델이 이 말을 번역해 내놓은 문장(다른 언어). 불분명한 단어를 가려내는 참고용으로만 줌.
+     */
+    fun transcribe(pcm: ByteArray, languageEnglish: String, hint: String? = null): String? {
         val wavB64 = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
         val system = "You are a speech-to-text engine. The speaker is speaking $languageEnglish. " +
             "Write exactly what was said, in $languageEnglish, in its normal script. " +
@@ -26,7 +29,11 @@ class Transcriber(private val apiKey: String) {
             "write the words they most plausibly intended. " +
             "Do not translate, do not answer, do not add anything. " +
             "If other languages or voices are also audible, ignore them. " +
-            "If there is no intelligible $languageEnglish speech, output an empty string."
+            "If there is no intelligible $languageEnglish speech, output an empty string." +
+            if (hint.isNullOrBlank()) "" else
+                " For reference only: an interpreter who heard this same clip rendered it in another language as " +
+                    "\"${hint.take(300)}\". Use that only to resolve words that are hard to hear. " +
+                    "Still write what was actually said in $languageEnglish; do not translate the reference back word for word."
         for (model in models.toList()) {
             var attempt = 0
             while (attempt < 2) {

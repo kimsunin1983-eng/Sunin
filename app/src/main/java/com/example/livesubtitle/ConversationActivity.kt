@@ -973,13 +973,16 @@ class ConversationActivity : AppCompatActivity() {
         while (recentTurns.size > 10) recentTurns.removeFirst()
     }
 
-    private fun fixOriginalIfWrong() {
+    /**
+     * 대화 기록의 원문 줄을 정확하게: 서버의 자동 받아쓰기는 언어도 모르고 부정확해서,
+     * 말이 끝날 때마다 그 소리를 말한 사람의 언어를 알려 주고(번역문도 참고로 주고) 다시 받아써서 바꿔 넣음.
+     */
+    private fun refineOriginal() {
         val views = liveBubble ?: return
         val e = ear ?: return
         if (e == Ear.BOTH) return
         val speaker = if (e == Ear.LEFT) right else left
         if (speaker.lang.code == AUTO) return
-        if (originalLooksRight(liveIn.toString().trim(), speaker, e)) return
 
         // 이 말의 소리 = 직전 번역이 나오기 시작한 뒤부터 이번 번역이 나오기 시작할 때까지 (최대 15초)
         val end = turnFirstOutputAt
@@ -993,9 +996,10 @@ class ConversationActivity : AppCompatActivity() {
         val worker = transcriber ?: return
         val target = views.first
         val language = speaker.lang.english
+        val translation = liveOut.toString().trim()
         runCatching {
             fixExecutor?.execute {
-                val text = runCatching { worker.transcribe(pcm, language) }.getOrNull()
+                val text = runCatching { worker.transcribe(pcm, language, translation) }.getOrNull()
                 if (!text.isNullOrBlank()) ui {
                     val script = detectScript(text)
                     if (script != null && matches(script, speaker)) {
@@ -1011,7 +1015,7 @@ class ConversationActivity : AppCompatActivity() {
         if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
         if (liveOut.isNotEmpty()) {
             rememberTurn()
-            fixOriginalIfWrong()
+            refineOriginal()
             prevFirstOutputAt = turnFirstOutputAt
         }
         if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
