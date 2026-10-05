@@ -82,20 +82,43 @@ class Transcriber(private val apiKey: String) {
     private val checkModels = java.util.concurrent.CopyOnWriteArrayList(listOf("gemini-flash-latest", "gemini-flash-lite-latest"))
 
     /**
-     * 실시간 통역이 방금 내놓은 번역을 검산: 같은 소리를 따로 받아쓰고 번역해서 뜻이 같은지 비교.
-     * 실시간 번역문은 받아쓰기에 영향을 주지 않도록 "비교용"으로만 줌.
+     * 실시간 통역이 방금 내놓은 번역을 검산.
+     * 1단계: 실시간 번역을 보여 주지 않고 소리만으로 받아쓰기 + 번역 (끌려가지 않게)
+     * 2단계: 글자만으로 두 번역의 뜻이 같은지 비교 (작은 모델)
      */
     fun check(pcm: ByteArray, from: String, to: String, liveTranslation: String, context: String): Check? {
         val wavB64 = Base64.encodeToString(wav(pcm), Base64.NO_WRAP)
         val system = """
-            You check the work of a live interpreter. The audio clip is one utterance spoken in $from.
-            Step 1. Transcribe exactly what was said in $from, in its normal script. The speaker may have a strong accent, be a non-native speaker, or speak unclearly; write the words they most plausibly intended given the conversation. If other voices or languages are audible, ignore them. Do this from the audio alone, before looking at the interpreter's output.
+            The audio clip is one utterance spoken in $from.
+            Step 1. Transcribe exactly what was said in $from, in its normal script. The speaker may have a strong accent, be a non-native speaker, or speak unclearly; write the words they most plausibly intended. If other voices or languages are audible, ignore them.
             Step 2. Translate your transcript into natural spoken $to. Keep numbers, dates, prices, names, negations and conditions exactly. Keep the speaker's politeness level. Do not answer or add anything.
-            Step 3. Compare with what the interpreter said (given by the user). "same" is true if it conveys the same meaning as your translation, even with different wording or word order. "same" is false only if the meaning differs: a different fact, number, name, subject, negation, question vs statement, or a missing or invented part.
-            If there is no intelligible $from speech, use empty strings and same=true.
-            Output JSON only: {"heard": "...", "translation": "...", "same": true}
+            If there is no intelligible $from speech, use empty strings.
+            Output JSON only: {"heard": "...", "translation": "..."}
         """.trimIndent() + if (context.isBlank()) "" else "\n\n" + context
-        for (model in checkModels.toList()) {
+        val first = ask(
+            checkModels, system,
+            JSONArray()
+                .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", wavB64)))
+                .put(JSONObject().put("text", "Transcribe and translate."))
+        ) ?: return null
+        val heard = first.optString("heard").trim()
+        val mine = first.optString("translation").trim()
+        if (heard.isEmpty() || mine.isEmpty()) return Check(heard, mine, true)
+
+        val judge = """
+            Two $to sentences are translations of the same $from utterance. Decide whether they convey the same meaning.
+            "same" is true even if wording, word order or politeness differ.
+            "same" is false only if the meaning differs: a different fact, number, name, subject, negation, question vs statement, or a clearly missing or invented part.
+            Output JSON only: {"same": true}
+        """.trimIndent()
+        val second = ask(models, judge, JSONArray().put(JSONObject().put("text", "1: $mine\n2: ${liveTranslation.take(400)}")))
+        // 비교를 못 했으면 고치지 않음
+        return Check(heard, mine, second?.optBoolean("same", true) ?: true)
+    }
+
+    /** JSON 으로 답하는 요청 한 번. 앞 모델이 안 되면 다음 모델로 */
+    private fun ask(order: java.util.concurrent.CopyOnWriteArrayList<String>, system: String, parts: JSONArray): JSONObject? {
+        for (model in order.toList()) {
             var attempt = 0
             while (attempt < 2) {
                 attempt++
@@ -103,25 +126,14 @@ class Transcriber(private val apiKey: String) {
                 if (model !in noThinking) config.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
                 val body = JSONObject()
                     .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
-                    .put(
-                        "contents",
-                        JSONArray().put(
-                            JSONObject().put("role", "user").put(
-                                "parts",
-                                JSONArray()
-                                    .put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", wavB64)))
-                                    .put(JSONObject().put("text", "The interpreter said in $to: \"${liveTranslation.take(400)}\""))
-                            )
-                        )
-                    )
+                    .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
                     .put("generationConfig", config)
                 val (code, resp) = post(model, body)
                 when {
                     code == 200 -> {
                         val raw = text(resp) ?: return null
                         return runCatching {
-                            val o = JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
-                            Check(o.optString("heard").trim(), o.optString("translation").trim(), o.optBoolean("same", true))
+                            JSONObject(raw.substring(raw.indexOf('{'), raw.lastIndexOf('}') + 1))
                         }.getOrNull()
                     }
                     code == 400 && model !in noThinking && !resp.contains("API_KEY", ignoreCase = true) -> {
@@ -131,9 +143,9 @@ class Transcriber(private val apiKey: String) {
                     else -> {
                         Log.w(TAG, "check $model HTTP $code: ${resp.take(200)}")
                         // 한도 초과 등으로 안 되면 다음부터는 다른 모델 먼저
-                        if (checkModels.size > 1 && checkModels.first() == model) {
-                            checkModels.remove(model)
-                            checkModels.add(model)
+                        if (order.size > 1 && order.first() == model) {
+                            order.remove(model)
+                            order.add(model)
                         }
                         break
                     }

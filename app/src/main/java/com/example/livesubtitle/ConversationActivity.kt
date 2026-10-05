@@ -426,7 +426,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (fastMode) {
                         synchronized(talkLog) {
                             talkLog.addLast(SystemClock.elapsedRealtime() to buf.copyOf(n))
-                            while (talkLog.size > 200) talkLog.removeFirst() // 최근 20초
+                            while (talkLog.size > 320) talkLog.removeFirst() // 최근 32초
                         }
                     }
                     live?.sendAudio(buf, n)
@@ -791,6 +791,7 @@ class ConversationActivity : AppCompatActivity() {
         }
         transcriber = Transcriber(apiKey)
         fixExecutor = Executors.newSingleThreadExecutor()
+        pendingChecks.set(0)
         synchronized(talkLog) { talkLog.clear() }
         recentTurns.clear()
         turnFirstOutputAt = 0L
@@ -828,7 +829,7 @@ class ConversationActivity : AppCompatActivity() {
         if (recentTurns.isNotEmpty()) {
             append("- The conversation so far (oldest first). Use it only to understand what comes next; ")
             append("do not repeat, translate again, or respond to these lines:\n")
-            recentTurns.forEach { append("    ").append(it.take(200)).append('\n') }
+            recentTurns.forEach { append("    ").append(it.line.take(200)).append('\n') }
         }
         append("This context only guides word choice. It never changes the rule: translate, never answer.")
     }
@@ -985,15 +986,18 @@ class ConversationActivity : AppCompatActivity() {
         if (ear == Ear.NONE) return
         val text = liveOut.toString()
         // 번역이 아닌 표시 문구면 버림. 오는 중일 수 있으면 조금 더 기다림
-        if (isPlaceholder(text) || (force && mightBecomePlaceholder(text))) {
+        // ("Music" 다음에 " is my life." 가 이어질 수 있으므로, 끝까지 기다렸다가 판단)
+        val suspicious = isPlaceholder(text) || mightBecomePlaceholder(text)
+        if (suspicious && !force) return
+        if (suspicious) {
             dropTurn()
             return
         }
-        if (!force && mightBecomePlaceholder(text)) return
 
         val script = detectScript(text)
-        // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단
-        val enough = text.count { it.isLetter() } >= 4
+        // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
+        // 다만 "네", "Yes" 처럼 짧게 끝난 말은 마지막 판단(force) 때 있는 글자로 정함
+        val enough = force || text.count { it.isLetter() } >= 4
         val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
         val scripts = setOf(left.script, right.script)
         val chosen = when {
@@ -1002,13 +1006,15 @@ class ConversationActivity : AppCompatActivity() {
                 val known = other(autoSide)
                 when {
                     known.script == "latin" -> Ear.BOTH // 알파벳 언어는 다른 알파벳 언어와 글자로 구분 불가
-                    script == null || !enough -> if (force) Ear.BOTH else return
+                    script == null -> if (force) Ear.BOTH else return
+                    !enough -> return
                     script == known.script -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
                     else -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
                 }
             }
             left.script == right.script -> Ear.BOTH // 글자로 구분 못 하는 언어쌍은 양쪽에
-            script == null || !enough -> if (force) Ear.BOTH else return
+            script == null -> if (force) Ear.BOTH else return
+            !enough -> return
             // 일본어↔중국어: 한자만으로는 어느 쪽인지 알 수 없음 → 가나가 나올 때까지 기다리고, 끝내 없으면 양쪽
             scripts == setOf("ja", "han") && script == "han" -> if (force) Ear.BOTH else return
             matches(script, left) -> Ear.LEFT
@@ -1035,7 +1041,10 @@ class ConversationActivity : AppCompatActivity() {
         val speaker = if (e == Ear.LEFT) right else left
         val views = liveBubble ?: addBubble(speaker, "", "").also { liveBubble = it }
         views.second.text = text
-        if (speakerMode && e != Ear.RIGHT) setFacing(text) // 상대가 읽도록 뒤집어 보여 주는 글자
+        if (speakerMode && e != Ear.RIGHT) {
+            setFacing(text)
+            facingSeq = turnSeq
+        } // 상대가 읽도록 뒤집어 보여 주는 글자
         // 자동 받아쓰기가 말한 사람의 언어와 다른 글자로 나오면(언어를 잘못 짚은 것) 보여 주지 않음
         val original = liveIn.toString().trim()
         views.first.text = original
@@ -1059,7 +1068,14 @@ class ConversationActivity : AppCompatActivity() {
     private var fixExecutor: ExecutorService? = null
 
     /** 최근 대화 (말한 언어 → 번역). 연결을 새로 맺을 때 넘겨줘서 맥락이 끊기지 않게 함 */
-    private val recentTurns = java.util.ArrayDeque<String>()
+    private class Turn(var line: String)
+    private val recentTurns = java.util.ArrayDeque<Turn>()
+    /** 말 한 번마다 올라가는 번호 */
+    private var turnSeq = 0
+    /** 상대가 읽는 큰 글자가 지금 몇 번째 말의 것인지 */
+    private var facingSeq = -1
+    /** 검산 대기 수 (밀리면 건너뜀) */
+    private val pendingChecks = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ── 번역이 아닌 출력 걸러내기 + 놓친 말 되살리기 ──
     /**
@@ -1095,7 +1111,7 @@ class ConversationActivity : AppCompatActivity() {
         ear = Ear.NONE
 
         val end = turnFirstOutputAt
-        val start = maxOf(prevFirstOutputAt, end - 15_000)
+        val start = maxOf(prevFirstOutputAt, end - 30_000)
         val pcm = synchronized(talkLog) {
             val out = java.io.ByteArrayOutputStream()
             talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
@@ -1104,24 +1120,26 @@ class ConversationActivity : AppCompatActivity() {
         if (pcm.size >= 32 * 500) rescue?.submitClip(pcm) // 0.5초 이상일 때만
     }
 
-    private fun rememberTurn() {
-        val e = ear ?: return
+    private fun rememberTurn(): Turn? {
+        val e = ear ?: return null
         val out = liveOut.toString().trim()
-        if (out.isEmpty() || e == Ear.BOTH || e == Ear.NONE) return
+        if (out.isEmpty() || e == Ear.BOTH || e == Ear.NONE) return null
         val speaker = if (e == Ear.LEFT) right else left
         val listener = other(speaker)
         val original = liveIn.toString().trim().takeIf { originalLooksRight(it, speaker, e) }
         val from = speaker.lang.english.ifBlank { "other language" }
         val to = listener.lang.english.ifBlank { "other language" }
-        recentTurns.addLast(if (original != null) "[$from] $original  →  [$to] $out" else "[$from → $to] $out")
+        val turn = Turn(if (original != null) "[$from] $original  →  [$to] $out" else "[$from → $to] $out")
+        recentTurns.addLast(turn)
         while (recentTurns.size > 10) recentTurns.removeFirst()
+        return turn
     }
 
     /**
      * 대화 기록의 원문 줄을 정확하게: 서버의 자동 받아쓰기는 언어도 모르고 부정확해서,
      * 말이 끝날 때마다 그 소리를 말한 사람의 언어를 알려 주고(번역문도 참고로 주고) 다시 받아써서 바꿔 넣음.
      */
-    private fun refineOriginal() {
+    private fun refineOriginal(context: String, turn: Turn?) {
         val views = liveBubble ?: return
         val e = ear ?: return
         if (e == Ear.BOTH || e == Ear.NONE) return
@@ -1130,7 +1148,7 @@ class ConversationActivity : AppCompatActivity() {
 
         // 이 말의 소리 = 직전 번역이 나오기 시작한 뒤부터 이번 번역이 나오기 시작할 때까지 (최대 15초)
         val end = turnFirstOutputAt
-        val start = maxOf(prevFirstOutputAt, end - 15_000)
+        val start = maxOf(prevFirstOutputAt, end - 30_000)
         val pcm = synchronized(talkLog) {
             val out = java.io.ByteArrayOutputStream()
             talkLog.forEach { (t, chunk) -> if (t > start && t <= end) out.write(chunk) }
@@ -1142,14 +1160,18 @@ class ConversationActivity : AppCompatActivity() {
         val translatedView = views.second
         val listener = other(speaker)
         val translation = liveOut.toString().trim()
-        val context = contextPrompt()
         val mine = session
+        val seq = turnSeq
+        if (pendingChecks.get() >= 3) return // 검산이 밀렸으면 이번 말은 건너뜀
+        pendingChecks.incrementAndGet()
         runCatching {
             fixExecutor?.execute {
                 // 검산: 같은 소리를 따로 받아쓰고 번역해, 실시간 번역과 뜻이 다르면 기록을 고침
                 val check = runCatching {
                     worker.check(pcm, speaker.lang.english, listener.lang.english, translation, context)
-                }.getOrNull() ?: return@execute
+                }.getOrNull()
+                pendingChecks.decrementAndGet()
+                if (check == null) return@execute
                 ui {
                     if (mine != session) return@ui
                     val script = detectScript(check.src)
@@ -1163,7 +1185,10 @@ class ConversationActivity : AppCompatActivity() {
                         outScript != null && matches(outScript, listener)
                     ) {
                         translatedView.text = check.out + "  ✎고침"
-                        if (speakerMode && listener.isLeft) setFacing(check.out)
+                        // 큰 글자는 아직 이 말을 보여 주고 있을 때만 바꿈 (다음 말로 넘어갔으면 그대로 둠)
+                        if (speakerMode && listener.isLeft && facingSeq == seq) setFacing(check.out)
+                        // 다음 번역이 참고하는 대화 맥락도 고친 내용으로
+                        turn?.line = "[${speaker.lang.english}] ${check.src}  →  [${listener.lang.english}] ${check.out}"
                     }
                 }
             }
@@ -1173,8 +1198,9 @@ class ConversationActivity : AppCompatActivity() {
     private fun endLiveTurn() {
         if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true)
         if (liveOut.isNotEmpty()) {
-            rememberTurn()
-            refineOriginal()
+            val before = contextPrompt() // 검산에는 이번 말이 들어가기 전의 맥락만 줌
+            val turn = rememberTurn()
+            refineOriginal(before, turn)
             prevFirstOutputAt = turnFirstOutputAt
         }
         if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
@@ -1194,6 +1220,7 @@ class ConversationActivity : AppCompatActivity() {
         heldAudio.clear()
         ear = null
         liveBubble = null
+        turnSeq++
         lastLiveOutputAt = 0L
     }
 
