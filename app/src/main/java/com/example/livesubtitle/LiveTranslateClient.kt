@@ -40,6 +40,10 @@ class LiveTranslateClient(
     private val systemInstruction: String? = null,
     /** 말하는 도중 다른 소리가 들려도 하던 말을 끊지 않게 함 */
     private val noInterruption: Boolean = false,
+    /** 번역을 말할 목소리 이름 (Kore, Aoede, Puck, Charon …). null 이면 모델 기본 */
+    private val voiceName: String? = null,
+    /** 말하는 사람의 감정·어조에 맞춰 말하기 (지원하는 모델에서만) */
+    private val affectiveDialog: Boolean = false,
 ) {
     interface Listener {
         fun onReady()
@@ -100,8 +104,10 @@ class LiveTranslateClient(
     }
 
     private fun setupMessage(): String =
-        buildSetup(translationInGenerationConfig, targetLanguage, echoTarget, model, systemInstruction, noInterruption)
-            .toString()
+        buildSetup(
+            translationInGenerationConfig, targetLanguage, echoTarget, model, systemInstruction, noInterruption,
+            voiceName, affectiveDialog
+        ).toString()
 
     private fun handle(text: String) {
         val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -177,12 +183,24 @@ class LiveTranslateClient(
             model: String = MODEL,
             systemInstruction: String? = null,
             noInterruption: Boolean = false,
+            voiceName: String? = null,
+            affectiveDialog: Boolean = false,
         ): JSONObject {
             val translation = JSONObject()
                 .put("targetLanguageCode", targetLanguage)
                 .put("echoTargetLanguage", echoTarget)
             val generationConfig = JSONObject()
                 .put("responseModalities", org.json.JSONArray().put("AUDIO"))
+            if (!voiceName.isNullOrBlank()) {
+                generationConfig.put(
+                    "speechConfig",
+                    JSONObject().put(
+                        "voiceConfig",
+                        JSONObject().put("prebuiltVoiceConfig", JSONObject().put("voiceName", voiceName))
+                    )
+                )
+            }
+            if (affectiveDialog) generationConfig.put("enableAffectiveDialog", true)
             val setup = JSONObject()
                 .put("model", "models/$model")
                 .put("inputAudioTranscription", JSONObject())

@@ -94,6 +94,7 @@ class ConversationActivity : AppCompatActivity() {
     private lateinit var chipWarn: View
     private lateinit var segSteady: TextView
     private lateinit var segFast: TextView
+    private lateinit var textFacing: TextView
 
     @Volatile private var running = false
     @Volatile private var micActive = false
@@ -122,6 +123,8 @@ class ConversationActivity : AppCompatActivity() {
         chipWarn = findViewById(R.id.chipWarn)
         segSteady = findViewById(R.id.segSteady)
         segFast = findViewById(R.id.segFast)
+        textFacing = findViewById(R.id.textFacing)
+        findViewById<View>(R.id.rowTalkSettings).setOnClickListener { showTalkSettings() }
         left.titleView = findViewById(R.id.textLeftTitle)
         left.stateView = findViewById(R.id.textLeftState)
         right.titleView = findViewById(R.id.textRightTitle)
@@ -186,7 +189,7 @@ class ConversationActivity : AppCompatActivity() {
             if (running) stop("통역을 종료했어요.")
             finish()
         }
-        updateCards()
+        loadTalkSettings()
         updateStatus()
     }
 
@@ -249,6 +252,10 @@ class ConversationActivity : AppCompatActivity() {
             toast("왼쪽과 오른쪽 언어를 다르게 골라 주세요.")
             return
         }
+        if (speakerMode && !fastMode) {
+            toast("'상대는 폰 스피커로 듣기'는 '실시간' 방식에서만 돼요.")
+            return
+        }
         if ((pickL.code == AUTO || pickR.code == AUTO) && !fastMode) {
             toast("자동 감지는 '실시간' 방식에서만 돼요.")
             return
@@ -267,6 +274,7 @@ class ConversationActivity : AppCompatActivity() {
         right.lang = languages[spinnerRight.selectedItemPosition]
 
         running = true
+        textFacing.text = ""
         if (fastMode) startFast() else startSteady()
         if (!startMic()) {
             stop("마이크를 열지 못했어요.")
@@ -301,6 +309,10 @@ class ConversationActivity : AppCompatActivity() {
         player = null
         runCatching { track?.pause(); track?.flush(); track?.release() }
         track = null
+        runCatching { speakerPlayer?.shutdownNow() }
+        speakerPlayer = null
+        runCatching { speakerTrack?.pause(); speakerTrack?.flush(); speakerTrack?.release() }
+        speakerTrack = null
 
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         spinnerLeft.isEnabled = true
@@ -377,6 +389,8 @@ class ConversationActivity : AppCompatActivity() {
 
     /** 이어폰이 없어서 번역 소리가 폰 스피커로 나오고 있는 중인지 */
     private fun speakerPlaying(): Boolean {
+        // 스피커 방식: 스피커로 번역이 나오는 동안(과 직후 0.4초)은 마이크가 그 소리를 다시 듣지 않게 함
+        if (speakerMode && SystemClock.elapsedRealtime() < speakerBusyUntil + 400) return true
         if (headphones) return false
         if (tts?.isSpeaking == true) return true
         return SystemClock.elapsedRealtime() - lastPlayAt < 600
@@ -432,6 +446,97 @@ class ConversationActivity : AppCompatActivity() {
         }
         val rms = Math.sqrt(sum / maxOf(1, n / 2))
         return (rms / 3500.0).toFloat().coerceIn(0f, 1f)
+    }
+
+    // ═════════════════════════ 통역 설정 ═════════════════════════
+    /** 상대는 이어폰 대신 폰 스피커로 듣기 (상대=왼쪽, 나=오른쪽) */
+    private var speakerMode = false
+    private var voice = ""
+    private var wantAffective = true
+    private var situation = 0
+    private var polite = true
+    private var notes = ""
+
+    /** 목소리 설정이 바뀌면 통하는 조합도 달라질 수 있어 따로 기억 */
+    private fun variantKey() = if (wantAffective) "talkLiveVariant3a" else "talkLiveVariant3"
+
+    private fun loadTalkSettings() {
+        speakerMode = prefs.getBoolean("talkSpeaker", false)
+        voice = prefs.getString("talkVoice", "").orEmpty()
+        wantAffective = prefs.getBoolean("talkAffective", true)
+        situation = prefs.getInt("talkSituation", 0)
+        polite = prefs.getBoolean("talkPolite", true)
+        notes = prefs.getString("talkNotes", "").orEmpty()
+        textFacing.visibility = if (speakerMode) View.VISIBLE else View.GONE
+        textFacing.text = ""
+        findViewById<TextView>(R.id.textTalkSummary).text = listOf(
+            if (speakerMode) "상대 스피커" else "이어폰 나눠 끼기",
+            SITUATIONS[situation.coerceIn(0, SITUATIONS.lastIndex)].first,
+            if (polite) "존댓말" else "편한 말",
+            VOICES.firstOrNull { it.second == voice }?.first ?: "기본 목소리",
+        ).joinToString(" · ")
+        updateCards()
+    }
+
+    private fun showTalkSettings() {
+        if (running) {
+            toast("통역을 종료한 뒤 바꿀 수 있어요.")
+            return
+        }
+        val pad = dp(20)
+        fun label(t: String) = TextView(this).apply {
+            text = t
+            textSize = 13f
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        fun spinner(items: List<String>, selected: Int) = Spinner(this).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, items)
+            setSelection(selected.coerceIn(0, items.lastIndex))
+        }
+        val listen = spinner(listOf("이어폰을 한쪽씩 나눠 끼기", "상대는 폰 스피커로 듣기 (나만 이어폰)"), if (speakerMode) 1 else 0)
+        val situationPick = spinner(SITUATIONS.map { it.first }, situation)
+        val politePick = spinner(listOf("존댓말", "편한 말 (반말)"), if (polite) 0 else 1)
+        val voicePick = spinner(VOICES.map { it.first }, VOICES.indexOfFirst { it.second == voice }.coerceAtLeast(0))
+        val affective = android.widget.CheckBox(this).apply {
+            text = "말하는 사람의 감정·어조에 맞춰 말하기"
+            isChecked = wantAffective
+        }
+        val notesEdit = android.widget.EditText(this).apply {
+            hint = "예: 내 이름 김민서, 호텔 Clark Marriott"
+            setText(notes)
+            maxLines = 3
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, 0, pad, 0)
+            addView(label("상대방이 번역을 듣는 방법"))
+            addView(listen)
+            addView(label("상황"))
+            addView(situationPick)
+            addView(label("말투"))
+            addView(politePick)
+            addView(label("번역 목소리"))
+            addView(voicePick)
+            addView(affective)
+            addView(label("이름·자주 나오는 단어 (번역이 정확해져요)"))
+            addView(notesEdit)
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("통역 설정")
+            .setView(ScrollView(this).apply { addView(content) })
+            .setPositiveButton("저장") { _, _ ->
+                prefs.edit()
+                    .putBoolean("talkSpeaker", listen.selectedItemPosition == 1)
+                    .putInt("talkSituation", situationPick.selectedItemPosition)
+                    .putBoolean("talkPolite", politePick.selectedItemPosition == 0)
+                    .putString("talkVoice", VOICES[voicePick.selectedItemPosition].second)
+                    .putBoolean("talkAffective", affective.isChecked)
+                    .putString("talkNotes", notesEdit.text.toString().trim())
+                    .apply()
+                loadTalkSettings()
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     // ═════════════════════════ 안정 방식 (문장 단위) ═════════════════════════
@@ -529,14 +634,18 @@ class ConversationActivity : AppCompatActivity() {
 
     private enum class Ear { LEFT, RIGHT, BOTH }
 
-    /** 시도할 (모델, 끼어들기 방지 설정 사용) 조합. 성공한 것을 기억해 다음에 먼저 씀 */
+    /** 시도할 연결 설정 조합. 서버가 거절하면 다음 것으로, 성공한 것을 기억해 다음에 먼저 씀 */
+    private data class Variant(val model: String, val vad: Boolean, val affective: Boolean)
+
     private val liveVariants = listOf(
-        "gemini-3.8-live" to true,
-        "gemini-3.8-live" to false,
-        "gemini-3.1-flash-live-preview" to true,
-        "gemini-3.1-flash-live-preview" to false,
-        "gemini-2.5-flash-native-audio-latest" to true,
-        "gemini-2.5-flash-native-audio-latest" to false,
+        Variant("gemini-3.8-live", vad = true, affective = true),
+        Variant("gemini-3.8-live", vad = true, affective = false),
+        Variant("gemini-3.8-live", vad = false, affective = false),
+        Variant("gemini-3.1-flash-live-preview", vad = true, affective = false),
+        Variant("gemini-3.1-flash-live-preview", vad = false, affective = false),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = true),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = false),
+        Variant("gemini-2.5-flash-native-audio-latest", vad = false, affective = false),
     )
     private var liveVariant = 0
 
@@ -587,14 +696,43 @@ class ConversationActivity : AppCompatActivity() {
         unansweredSpeechMs = 0
         lastSpeechAt = SystemClock.elapsedRealtime()
         main.postDelayed(liveWatchdog, 1000)
-        liveVariant = prefs.getInt("talkLiveVariant", 0).coerceIn(0, liveVariants.lastIndex)
+        liveVariant = prefs.getInt(variantKey(), 0).coerceIn(0, liveVariants.lastIndex)
         track = newTrack().also { it.play() }
         player = Executors.newSingleThreadExecutor()
+        if (speakerMode) {
+            // 상대에게 가는 번역은 폰 스피커로 (이어폰이 연결돼 있어도 이 소리만 스피커로 보냄)
+            speakerTrack = newTrack().also { t ->
+                val speaker = getSystemService(AudioManager::class.java)
+                    .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                if (speaker != null) runCatching { t.setPreferredDevice(speaker) }
+                t.play()
+            }
+            speakerPlayer = Executors.newSingleThreadExecutor()
+        }
         resetLiveTurn()
         connectLive()
     }
 
-    private fun interpreterPrompt(): String {
+    private fun interpreterPrompt(): String = basePrompt() + "\n\n" + contextPrompt()
+
+    /** 상황·말투·이름 등 사용자가 미리 알려 준 내용 */
+    private fun contextPrompt(): String = buildString {
+        append("Context for better translations:\n")
+        append("- Situation: ").append(SITUATIONS[situation.coerceIn(0, SITUATIONS.lastIndex)].second).append('\n')
+        if (polite) {
+            append("- Register: polite. When the output is Korean use 존댓말 (해요체). In other languages use a polite, friendly register.\n")
+        } else {
+            append("- Register: casual, as between friends. When the output is Korean use 반말.\n")
+        }
+        if (notes.isNotBlank()) {
+            append("- Names and terms that may come up; keep them accurate and do not translate proper names: ")
+                .append(notes.replace('\n', ' ').take(300)).append('\n')
+        }
+        append("This context only guides word choice. It never changes the rule: translate, never answer.")
+    }
+
+    private fun basePrompt(): String {
         // 한쪽이 자동 감지: 정해진 언어(known)와 "그 밖의 어떤 언어" 사이를 통역
         val known = when {
             left.lang.code == AUTO -> right.lang.english
@@ -634,7 +772,11 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun connectLive() {
         if (!running) return
-        val (model, noInterrupt) = liveVariants[liveVariant]
+        // '감정 따라 말하기'를 껐으면 그 설정이 들어간 조합은 건너뜀
+        while (!wantAffective && liveVariants[liveVariant].affective) {
+            liveVariant = (liveVariant + 1) % liveVariants.size
+        }
+        val variant = liveVariants[liveVariant]
         lateinit var client: LiveTranslateClient
         client = LiveTranslateClient(
             apiKey, false, true,
@@ -643,7 +785,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (live === client) {
                         liveReady = true
                         liveConnectedAt = SystemClock.elapsedRealtime()
-                        prefs.edit().putInt("talkLiveVariant", liveVariant).apply()
+                        prefs.edit().putInt(variantKey(), liveVariant).apply()
                         updateStatus()
                     }
                 }
@@ -698,9 +840,11 @@ class ConversationActivity : AppCompatActivity() {
                     if (running) updateStatus()
                 }
             },
-            model = model,
+            model = variant.model,
             systemInstruction = interpreterPrompt(),
-            noInterruption = noInterrupt,
+            noInterruption = variant.vad,
+            voiceName = voice.ifBlank { null },
+            affectiveDialog = variant.affective,
         )
         live = client
         client.connect()
@@ -761,6 +905,7 @@ class ConversationActivity : AppCompatActivity() {
         val speaker = if (e == Ear.LEFT) right else left
         val views = liveBubble ?: addBubble(speaker, "", "").also { liveBubble = it }
         views.second.text = text
+        if (speakerMode && e != Ear.RIGHT) textFacing.text = text // 상대가 읽도록 뒤집어 보여 주는 글자
         val original = liveIn.toString().trim()
         views.first.text = original
         views.first.visibility = if (original.isBlank()) View.GONE else View.VISIBLE
@@ -818,23 +963,53 @@ class ConversationActivity : AppCompatActivity() {
             }
     }
 
-    /** mono PCM 을 고른 귀에만(또는 양쪽에) 재생 */
-    private fun play(mono: ByteArray, e: Ear) {
-        val t = track ?: return
+    private var speakerTrack: AudioTrack? = null
+    private var speakerPlayer: ExecutorService? = null
+    /** 폰 스피커로 내보낸 소리가 다 나올 것으로 예상되는 시각 */
+    @Volatile private var speakerBusyUntil = 0L
+
+    private fun stereo(mono: ByteArray, toLeft: Boolean, toRight: Boolean): ByteArray {
         val out = ByteArray(mono.size * 2)
         var i = 0
         while (i + 1 < mono.size) {
-            if (e != Ear.RIGHT) {
+            if (toLeft) {
                 out[i * 2] = mono[i]
                 out[i * 2 + 1] = mono[i + 1]
             }
-            if (e != Ear.LEFT) {
+            if (toRight) {
                 out[i * 2 + 2] = mono[i]
                 out[i * 2 + 3] = mono[i + 1]
             }
             i += 2
         }
-        lastPlayAt = SystemClock.elapsedRealtime()
+        return out
+    }
+
+    /**
+     * 번역 소리 재생.
+     * - 이어폰 나눠 끼기: 고른 귀에만
+     * - 스피커 방식: 상대(왼쪽)에게 가는 번역은 폰 스피커로, 나(오른쪽)에게 오는 번역은 이어폰 양쪽으로
+     */
+    private fun play(mono: ByteArray, e: Ear) {
+        val now = SystemClock.elapsedRealtime()
+        lastPlayAt = now
+        if (speakerMode) {
+            if (e != Ear.RIGHT) { // 상대에게 → 스피커
+                val t = speakerTrack
+                val out = stereo(mono, toLeft = true, toRight = true)
+                val ms = mono.size / 2 * 1000L / OUT_RATE
+                speakerBusyUntil = maxOf(now, speakerBusyUntil) + ms
+                runCatching { speakerPlayer?.execute { runCatching { t?.write(out, 0, out.size) } } }
+            }
+            if (e != Ear.LEFT) { // 나에게 → 이어폰 양쪽
+                val t = track ?: return
+                val out = stereo(mono, toLeft = true, toRight = true)
+                runCatching { player?.execute { runCatching { t.write(out, 0, out.size) } } }
+            }
+            return
+        }
+        val t = track ?: return
+        val out = stereo(mono, toLeft = e != Ear.RIGHT, toRight = e != Ear.LEFT)
         runCatching { player?.execute { runCatching { t.write(out, 0, out.size) } } }
     }
 
@@ -905,8 +1080,15 @@ class ConversationActivity : AppCompatActivity() {
 
     /** 고른 언어를 카드 제목에 반영 */
     private fun updateCards() {
-        left.titleView.text = "L · " + languages[spinnerLeft.selectedItemPosition.coerceAtLeast(0)].name
-        right.titleView.text = "R · " + languages[spinnerRight.selectedItemPosition.coerceAtLeast(0)].name
+        val l = languages[spinnerLeft.selectedItemPosition.coerceAtLeast(0)].name
+        val r = languages[spinnerRight.selectedItemPosition.coerceAtLeast(0)].name
+        if (speakerMode) {
+            left.titleView.text = "상대 · $l · 스피커"
+            right.titleView.text = "나 · $r · 이어폰"
+        } else {
+            left.titleView.text = "L · $l"
+            right.titleView.text = "R · $r"
+        }
     }
 
     private fun updateStatus() {
@@ -985,6 +1167,26 @@ class ConversationActivity : AppCompatActivity() {
 
     companion object {
         private const val AUTO = "auto"
+
+        /** (화면 이름, 모델에 알려 줄 설명) */
+        private val SITUATIONS = listOf(
+            "일상 대화" to "everyday conversation between two people",
+            "여행" to "a traveler talking with local people (hotel, airport, directions, tickets)",
+            "식당·카페" to "a customer and staff at a restaurant or cafe (ordering, menu, payment)",
+            "쇼핑" to "a customer and a seller at a shop or market (prices, sizes, bargaining)",
+            "택시·이동" to "a passenger and a driver (destination, route, fare)",
+            "업무·회의" to "a business conversation between colleagues or partners",
+            "병원·약국" to "a patient and medical or pharmacy staff (symptoms, medicine, instructions); be precise",
+        )
+
+        /** (화면 이름, 목소리 이름) */
+        private val VOICES = listOf(
+            "기본 목소리" to "",
+            "여성 · 차분함" to "Kore",
+            "여성 · 밝음" to "Aoede",
+            "남성 · 밝음" to "Puck",
+            "남성 · 차분함" to "Charon",
+        )
         private const val IN_RATE = 16000
         private const val OUT_RATE = 24000
     }
