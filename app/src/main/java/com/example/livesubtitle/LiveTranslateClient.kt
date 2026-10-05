@@ -52,6 +52,8 @@ class LiveTranslateClient(
         fun onAudio(pcm: ByteArray) {}
         /** 방금 들은 말의 언어 코드 (서버가 알려 줄 때만) */
         fun onInputLanguage(code: String) {}
+        /** 모델이 하던 말을 중간에 끊음 → 재생 중인 소리를 비워야 함 */
+        fun onInterrupted() {}
     }
 
     private val http = OkHttpClient.Builder()
@@ -116,6 +118,7 @@ class LiveTranslateClient(
             return
         }
         val content = msg.optJSONObject("serverContent") ?: return
+        if (content.optBoolean("interrupted")) listener.onInterrupted()
         content.optJSONObject("inputTranscription")?.let { t ->
             t.optString("languageCode").let { if (it.isNotEmpty()) listener.onInputLanguage(it) }
             t.optString("text").let { if (it.isNotEmpty()) listener.onInputText(it) }
@@ -185,7 +188,18 @@ class LiveTranslateClient(
                 .put("inputAudioTranscription", JSONObject())
                 .put("outputAudioTranscription", JSONObject())
             if (noInterruption) {
-                setup.put("realtimeInputConfig", JSONObject().put("activityHandling", "NO_INTERRUPTION"))
+                setup.put(
+                    "realtimeInputConfig",
+                    JSONObject()
+                        .put("activityHandling", "NO_INTERRUPTION") // 번역을 말하는 도중 끊지 않음
+                        .put(
+                            "automaticActivityDetection",
+                            JSONObject()
+                                .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH") // 작은 목소리도 말의 시작으로
+                                .put("prefixPaddingMs", 200)
+                                .put("silenceDurationMs", 500) // 0.5초 조용하면 말이 끝난 것으로 → 번역을 빨리 시작
+                        )
+                )
             }
             if (systemInstruction != null) {
                 // 일반 실시간 모델: 지시문으로 역할을 정함

@@ -138,7 +138,7 @@ class ConversationActivity : AppCompatActivity() {
         spinnerLeft.onItemSelectedListener = onPick
         spinnerRight.onItemSelectedListener = onPick
 
-        fastMode = prefs.getString("talkMode", "steady") == "fast"
+        fastMode = prefs.getString("talkMode2", "fast") == "fast" // 기본은 실시간
         segSteady.setOnClickListener { setMode(false) }
         segFast.setOnClickListener { setMode(true) }
         renderMode()
@@ -186,7 +186,7 @@ class ConversationActivity : AppCompatActivity() {
             return
         }
         fastMode = fast
-        prefs.edit().putString("talkMode", if (fast) "fast" else "steady").apply()
+        prefs.edit().putString("talkMode2", if (fast) "fast" else "steady").apply()
         renderMode()
     }
 
@@ -199,9 +199,9 @@ class ConversationActivity : AppCompatActivity() {
         }
         if (!running) {
             status.text = if (fastMode) {
-                "실시간 방식: 더 빠르지만 가끔 번역 대신 대답할 수 있어요"
+                "실시간: 말이 끝나면 바로 번역이 들려요"
             } else {
-                "안정 방식: 말을 마치면 2~4초 뒤 번역이 들려요"
+                "문장 단위: 단계별로 확인해 정확하지만 3~5초 걸려요"
             }
         }
     }
@@ -287,7 +287,7 @@ class ConversationActivity : AppCompatActivity() {
             IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
         val r = AudioRecord(
-            MediaRecorder.AudioSource.MIC, IN_RATE,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION, IN_RATE, // 떨어진 거리의 말소리 인식용
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             maxOf(minBuf, IN_RATE * 2)
         )
@@ -308,8 +308,13 @@ class ConversationActivity : AppCompatActivity() {
                 while (micActive) {
                     val n = r.read(buf, 0, buf.size)
                     if (n <= 0 || !running) continue
+                    boost(buf, n)
                     val lv = level(buf, n)
                     wave.push(lv)
+                    if (lv > 0.1f) {
+                        lastSpeechAt = SystemClock.elapsedRealtime()
+                        unansweredSpeechMs += 100
+                    }
                     // 이어폰 없이 폰 스피커로 번역이 나오는 동안에는 그 소리를 다시 듣지 않도록 쉼
                     if (speakerPlaying()) continue
                     utterance?.feed(buf, n, lv)
@@ -330,6 +335,32 @@ class ConversationActivity : AppCompatActivity() {
         if (headphones) return false
         if (tts?.isSpeaking == true) return true
         return SystemClock.elapsedRealtime() - lastPlayAt < 600
+    }
+
+    // 최근 가장 큰 소리 크기 (천천히 줄어듦). 목소리가 작게 들어오면 이 값이 작아져서 더 많이 키움
+    private var peakEnvelope = 4000f
+
+    /** 폰에서 떨어져 말해 작게 들어온 목소리를 최대 4배까지 키움 (제자리에서 수정) */
+    private fun boost(buf: ByteArray, n: Int) {
+        var peak = 0
+        var i = 0
+        while (i + 1 < n) {
+            val v = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xff)).toShort().toInt()
+            val a = if (v < 0) -v else v
+            if (a > peak) peak = a
+            i += 2
+        }
+        peakEnvelope = maxOf(peak.toFloat(), peakEnvelope * 0.97f, 600f)
+        val gain = (12000f / peakEnvelope).coerceIn(1f, 4f)
+        if (gain <= 1.05f) return
+        i = 0
+        while (i + 1 < n) {
+            val v = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xff)).toShort().toInt()
+            val g = (v * gain).toInt().coerceIn(-32768, 32767)
+            buf[i] = g.toByte()
+            buf[i + 1] = (g shr 8).toByte()
+            i += 2
+        }
     }
 
     /** 소리 크기를 0~1 로 */
@@ -451,8 +482,53 @@ class ConversationActivity : AppCompatActivity() {
     )
     private var liveVariant = 0
 
+    // ── 멈춤 감지 ──
+    @Volatile private var lastSpeechAt = 0L
+    /** 마지막 번역 이후에 들어온 말소리 길이(ms). 번역이 나오면 0 으로 */
+    @Volatile private var unansweredSpeechMs = 0
+    private var misses = 0
+    private var liveConnectedAt = 0L
+
+    private val liveWatchdog = object : Runnable {
+        override fun run() {
+            if (!running || !fastMode) return
+            val now = SystemClock.elapsedRealtime()
+            val quietFor = now - lastSpeechAt
+            val idleOutput = now - lastLiveOutputAt > 3000 && ear == null
+            if (liveReady) {
+                // 1.5초 넘게 말했는데 말이 끝난 지 6초가 지나도록 번역이 없음 → 놓친 것
+                if (unansweredSpeechMs >= 1500 && quietFor > 6000) {
+                    unansweredSpeechMs = 0
+                    misses++
+                    if (misses >= 2) renewLive("번역이 멈춘 것 같아 다시 연결했어요")
+                }
+                // 연결이 8분 넘었으면 조용한 틈에 미리 새로 맺음 (서버 시간 제한·누적 대화로 인한 느려짐 예방)
+                else if (now - liveConnectedAt > 8 * 60_000 && quietFor > 3000 && idleOutput) {
+                    renewLive(null)
+                }
+            }
+            main.postDelayed(this, 1000)
+        }
+    }
+
+    private fun renewLive(message: String?) {
+        misses = 0
+        unansweredSpeechMs = 0
+        val old = live
+        live = null
+        liveReady = false
+        runCatching { old?.close() }
+        resetLiveTurn()
+        if (message != null) status.text = message
+        connectLive()
+    }
+
     private fun startFast() {
         liveFailures = 0
+        misses = 0
+        unansweredSpeechMs = 0
+        lastSpeechAt = SystemClock.elapsedRealtime()
+        main.postDelayed(liveWatchdog, 1000)
         liveVariant = prefs.getInt("talkLiveVariant", 0).coerceIn(0, liveVariants.lastIndex)
         track = newTrack().also { it.play() }
         player = Executors.newSingleThreadExecutor()
@@ -472,7 +548,9 @@ class ConversationActivity : AppCompatActivity() {
             - Detect the language of each utterance independently. The language can change on every utterance.
             - Say ONLY the translation, in a natural conversational tone that keeps the speaker's politeness level.
             - NEVER answer questions, never greet back, never add comments, explanations, or filler. If someone asks "How are you?", translate the question; do not reply to it.
-            - If you hear silence, noise, music, or speech you cannot understand, say nothing.
+            - Translate every utterance, even short ones such as "yes", "okay", a name, or a single word.
+            - If part of the speech is unclear, translate the part you understood rather than staying silent.
+            - If you hear only silence, noise, or music, say nothing.
         """.trimIndent()
     }
 
@@ -486,6 +564,7 @@ class ConversationActivity : AppCompatActivity() {
                 override fun onReady() = ui {
                     if (live === client) {
                         liveReady = true
+                        liveConnectedAt = SystemClock.elapsedRealtime()
                         prefs.edit().putInt("talkLiveVariant", liveVariant).apply()
                         updateStatus()
                     }
@@ -512,6 +591,13 @@ class ConversationActivity : AppCompatActivity() {
 
                 override fun onTurnComplete() = ui {
                     if (live === client) endLiveTurn()
+                }
+
+                override fun onInterrupted() = ui {
+                    if (live !== client) return@ui
+                    // 모델이 하던 말을 끊음 → 재생 대기 중인 소리를 비움
+                    heldAudio.clear()
+                    runCatching { track?.pause(); track?.flush(); track?.play() }
                 }
 
                 override fun onClosed(error: String?, gotOutput: Boolean) = ui {
@@ -544,6 +630,8 @@ class ConversationActivity : AppCompatActivity() {
 
     /** 번역 소리/글자가 올 때마다: 새 턴이면 귀 선택 대기 시작, 1.5초 조용하면 턴 종료 */
     private fun touchLiveTurn() {
+        misses = 0
+        unansweredSpeechMs = 0
         val now = SystemClock.elapsedRealtime()
         val active = liveOut.isNotEmpty() || heldAudio.isNotEmpty() || ear != null
         if (active && now - lastLiveOutputAt > 1500) endLiveTurn()
