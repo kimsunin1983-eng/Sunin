@@ -179,10 +179,33 @@
         </LinearLayout>
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_input"
+        android:orientation="horizontal"
+        android:padding="4dp">
+
+        <TextView
+            android:id="@+id/segSteady"
+            style="@style/Segment"
+            android:layout_height="38dp"
+            android:text="안정 · 문장 단위"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/segFast"
+            style="@style/Segment"
+            android:layout_height="38dp"
+            android:text="빠름 · 실시간 (실험)"
+            android:textSize="13sp" />
+    </LinearLayout>
+
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
+        android:layout_marginTop="10dp"
         android:gravity="center"
         android:text="휴대폰을 두 사람 사이에 놓아 주세요"
         android:textColor="@color/textDim"

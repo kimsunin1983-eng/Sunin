@@ -28,7 +28,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="실시간 번역"
+                    android:text="이어톡"
                     android:textColor="@color/text"
                     android:textSize="28sp"
                     android:textStyle="bold" />

@@ -269,6 +269,64 @@
             android:background="@color/stroke" />
 
         <LinearLayout
+            android:id="@+id/rowLines"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="12dp">
+
+            <TextView
+                style="@style/RowLabel"
+                android:text="자막 줄 수" />
+
+            <TextView
+                android:id="@+id/valueLines"
+                style="@style/RowValue"
+                android:text="3줄" />
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginStart="6dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_chevron"
+                android:tint="@color/textFaint" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginStart="16dp"
+            android:background="@color/stroke" />
+
+        <LinearLayout
+            android:id="@+id/rowRefine"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="12dp">
+
+            <TextView
+                style="@style/RowLabel"
+                android:text="완성 번역으로 다듬기" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchRefine"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginStart="16dp"
+            android:background="@color/stroke" />
+
+        <LinearLayout
             android:id="@+id/rowOffline"
             android:layout_width="match_parent"
             android:layout_height="52dp"

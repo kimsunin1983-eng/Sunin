@@ -34,6 +34,12 @@ class LiveTranslateClient(
     private val targetLanguage: String = "ko",
     /** true: 이미 그 언어로 말한 것도 그대로 따라 말함, false: 조용히 있음 */
     private val echoTarget: Boolean = true,
+    /** 쓸 모델. 기본은 번역 전용 모델 */
+    private val model: String = MODEL,
+    /** 주어지면 번역 전용 설정 대신 이 지시문을 따르는 일반 실시간 모델로 동작 (대화 통역용) */
+    private val systemInstruction: String? = null,
+    /** 말하는 도중 다른 소리가 들려도 하던 말을 끊지 않게 함 */
+    private val noInterruption: Boolean = false,
 ) {
     interface Listener {
         fun onReady()
@@ -92,7 +98,8 @@ class LiveTranslateClient(
     }
 
     private fun setupMessage(): String =
-        buildSetup(translationInGenerationConfig, targetLanguage, echoTarget).toString()
+        buildSetup(translationInGenerationConfig, targetLanguage, echoTarget, model, systemInstruction, noInterruption)
+            .toString()
 
     private fun handle(text: String) {
         val msg = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -164,6 +171,9 @@ class LiveTranslateClient(
             translationInGenerationConfig: Boolean,
             targetLanguage: String = "ko",
             echoTarget: Boolean = true,
+            model: String = MODEL,
+            systemInstruction: String? = null,
+            noInterruption: Boolean = false,
         ): JSONObject {
             val translation = JSONObject()
                 .put("targetLanguageCode", targetLanguage)
@@ -171,10 +181,19 @@ class LiveTranslateClient(
             val generationConfig = JSONObject()
                 .put("responseModalities", org.json.JSONArray().put("AUDIO"))
             val setup = JSONObject()
-                .put("model", "models/$MODEL")
+                .put("model", "models/$model")
                 .put("inputAudioTranscription", JSONObject())
                 .put("outputAudioTranscription", JSONObject())
-            if (translationInGenerationConfig) {
+            if (noInterruption) {
+                setup.put("realtimeInputConfig", JSONObject().put("activityHandling", "NO_INTERRUPTION"))
+            }
+            if (systemInstruction != null) {
+                // 일반 실시간 모델: 지시문으로 역할을 정함
+                setup.put(
+                    "systemInstruction",
+                    JSONObject().put("parts", org.json.JSONArray().put(JSONObject().put("text", systemInstruction)))
+                )
+            } else if (translationInGenerationConfig) {
                 generationConfig.put("translationConfig", translation)
             } else {
                 setup.put("translationConfig", translation)

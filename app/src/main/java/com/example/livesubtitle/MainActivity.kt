@@ -290,7 +290,7 @@ class MainActivity : AppCompatActivity() {
 
         // 2) 다른 앱 위에 표시 권한
         if (!Settings.canDrawOverlays(this)) {
-            toast("'실시간 자막 번역'을 찾아 '다른 앱 위에 표시'를 허용한 뒤 돌아와서 다시 눌러 주세요.")
+            toast("'이어톡'을 찾아 '다른 앱 위에 표시'를 허용한 뒤 돌아와서 다시 눌러 주세요.")
             openOverlaySettings()
             return
         }
@@ -382,6 +382,24 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<View>(R.id.rowOriginal).setOnClickListener { switchOriginal.toggle() }
 
+        // 자막 줄 수: 누를 때마다 2 → 3 → 4 → 2
+        findViewById<View>(R.id.rowLines).setOnClickListener {
+            val next = when (prefs.getInt("captionLines", 3)) {
+                2 -> 3
+                3 -> 4
+                else -> 2
+            }
+            prefs.edit().putInt("captionLines", next).apply()
+            refreshSettings()
+        }
+
+        val switchRefine = findViewById<SwitchCompat>(R.id.switchRefine)
+        switchRefine.isChecked = prefs.getBoolean("refine", true)
+        switchRefine.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("refine", checked).apply()
+        }
+        findViewById<View>(R.id.rowRefine).setOnClickListener { switchRefine.toggle() }
+
         val switchOffline = findViewById<SwitchCompat>(R.id.switchOffline)
         switchOffline.isChecked = prefs.getBoolean("offline", true)
         switchOffline.setOnCheckedChangeListener { _, checked ->
@@ -439,6 +457,7 @@ class MainActivity : AppCompatActivity() {
         val code = prefs.getString("langCode", "auto")
         findViewById<TextView>(R.id.valueLanguage).text = languages.firstOrNull { it.second == code }?.first ?: "자동 감지"
         findViewById<View>(R.id.rowOffline).visibility = if (idx == 2) View.VISIBLE else View.GONE
+        findViewById<TextView>(R.id.valueLines).text = "${prefs.getInt("captionLines", 3)}줄"
 
         setPermission(R.id.valuePermMic, granted(Manifest.permission.RECORD_AUDIO))
         setPermission(

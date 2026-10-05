@@ -13,4 +13,5 @@
     <color name="textFaint">#5F7187</color>
     <color name="warn">#F2B84B</color>
     <color name="onTeal">#062A26</color>
+    <color name="launcherBg">#011343</color>
 </resources>

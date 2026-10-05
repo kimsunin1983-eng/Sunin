@@ -27,6 +27,8 @@ class SubtitleOverlay(
     /** 예: "자동 감지 → 한국어" */
     private val label: String,
     private val showOriginal: Boolean,
+    /** 화면에 남겨 둘 지난 문장 수 (지금 문장 제외) */
+    private val previousCount: Int,
     private val onClose: () -> Unit,
 ) {
     /** PARTIAL: 말하는 중, DRAFT: 초벌 번역, FINAL: 다듬어진 번역 */
@@ -76,7 +78,7 @@ class SubtitleOverlay(
         setTextColor(Color.WHITE)
         textSize = 18f
         typeface = Typeface.DEFAULT_BOLD
-        maxLines = 3
+        maxLines = 2
         setLineSpacing(dp(2).toFloat(), 1f)
         setShadowLayer(4f, 0f, 1f, Color.BLACK)
         layoutParams = LinearLayout.LayoutParams(
@@ -84,7 +86,8 @@ class SubtitleOverlay(
         ).apply { topMargin = dp(6) }
     }
 
-    private val previous = line().apply { visibility = View.GONE }
+    /** 지난 문장들 (위가 더 오래된 것). 오래된 줄일수록 조금 흐리게 */
+    private val previous = List(previousCount.coerceIn(1, 4)) { line().apply { visibility = View.GONE } }
     private val current = line()
 
     private val original = TextView(context).apply {
@@ -113,7 +116,7 @@ class SubtitleOverlay(
         setBackgroundResource(R.drawable.bg_overlay)
         addView(handle)
         addView(header)
-        addView(previous)
+        previous.forEach { addView(it) }
         addView(original)
         addView(current)
         addView(hint)
@@ -167,20 +170,28 @@ class SubtitleOverlay(
 
     /** 안내·오류 문구 한 줄 */
     fun setStatus(text: String) {
-        previous.visibility = View.GONE
+        previous.forEach { it.visibility = View.GONE }
         original.visibility = View.GONE
         stateView.text = ""
         current.text = text
         current.alpha = 0.85f
     }
 
-    /** 위: 직전 문장 / (원문) / 아래: 지금 문장 */
-    fun render(previousText: String?, originalText: String, currentText: String, tone: Tone) {
-        if (previousText.isNullOrBlank()) {
-            previous.visibility = View.GONE
-        } else {
-            previous.text = previousText
-            previous.visibility = View.VISIBLE
+    /** 위: 지난 문장들(오래된 것부터) / (원문) / 아래: 지금 문장 */
+    fun render(previousTexts: List<String>, originalText: String, currentText: String, tone: Tone) {
+        val shown = previousTexts.filter { it.isNotBlank() }.takeLast(previous.size)
+        // 아래쪽 칸부터 최근 문장을 채움
+        val offset = previous.size - shown.size
+        previous.forEachIndexed { i, view ->
+            val text = shown.getOrNull(i - offset)
+            if (text == null) {
+                view.visibility = View.GONE
+            } else {
+                view.text = text
+                view.visibility = View.VISIBLE
+                // 바로 앞 문장은 선명하게, 더 오래된 문장은 조금 흐리게
+                view.alpha = if (i == previous.size - 1) 1f else 0.75f
+            }
         }
         original.text = originalText
         original.visibility = if (!showOriginal || originalText.isBlank()) View.GONE else View.VISIBLE

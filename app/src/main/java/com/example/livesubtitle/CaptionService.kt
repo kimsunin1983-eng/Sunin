@@ -102,6 +102,7 @@ class CaptionService : Service() {
     @Volatile private var captureActive = false
     private var geminiKey = ""
     private var showOriginal = false
+    private var captionLines = 3
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -120,7 +121,7 @@ class CaptionService : Service() {
         val engine = prefs.getString("engine", "live")
         val wantLive = key.isNotEmpty() && engine == "live"
         val wantListen = key.isNotEmpty() && engine == "listen"
-        if (key.isNotEmpty() && (wantLive || !langTag.startsWith("ko"))) {
+        if (key.isNotEmpty() && prefs.getBoolean("refine", true) && (wantLive || !langTag.startsWith("ko"))) {
             // 실시간 통역은 언어를 자동 감지하므로 언어 이름을 특정하지 않음
             val given = intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag
             val name = if (wantLive || given == "자동 감지") "외국어" else given
@@ -143,7 +144,8 @@ class CaptionService : Service() {
         // Gemini 방식은 언어를 자동으로 알아내고, 기본 방식은 고른 언어로 인식
         val shownLanguage = if (wantLive || wantListen) "자동 감지" else
             (intent.getStringExtra(EXTRA_LANG_NAME)?.takeIf { it != "자동 감지" } ?: "영어")
-        overlay = SubtitleOverlay(this, "$shownLanguage → 한국어", showOriginal) { stopSelf() }.also {
+        captionLines = prefs.getInt("captionLines", 3).coerceIn(2, 4)
+        overlay = SubtitleOverlay(this, "$shownLanguage → 한국어", showOriginal, captionLines - 1) { stopSelf() }.also {
             try {
                 it.show()
             } catch (e: Exception) {
@@ -556,11 +558,15 @@ class CaptionService : Service() {
         render()
     }
 
+    /** lines[0 until end] 중 최근 문장들의 번역 (자막 창의 지난 문장 칸에 표시) */
+    private fun recent(end: Int): List<String> =
+        lines.subList(maxOf(0, end - (captionLines - 1)), maxOf(0, end)).mapNotNull { it.best }
+
     private fun render() {
         val o = overlay ?: return
         val pOrig = partialOriginal
         if (pOrig != null) {
-            o.render(lines.lastOrNull()?.best, pOrig, partialDraft ?: "", SubtitleOverlay.Tone.PARTIAL)
+            o.render(recent(lines.size), pOrig, partialDraft ?: "", SubtitleOverlay.Tone.PARTIAL)
             return
         }
         val last = lines.lastOrNull() ?: return
@@ -568,7 +574,7 @@ class CaptionService : Service() {
             last.refined != null || refiner == null -> SubtitleOverlay.Tone.FINAL
             else -> SubtitleOverlay.Tone.DRAFT
         }
-        o.render(lines.getOrNull(lines.size - 2)?.best, last.original, last.best ?: "…", tone)
+        o.render(recent(lines.size - 1), last.original, last.best ?: "…", tone)
     }
 
     /** 초벌 번역: 온라인 Google 번역, 안 되면 ML Kit */
@@ -857,7 +863,7 @@ class CaptionService : Service() {
         val o = overlay ?: return
         if (liveIn.isBlank() && liveOut.isBlank()) return
         o.render(
-            lines.lastOrNull()?.best,
+            recent(lines.size),
             liveIn.toString().trim(),
             liveOut.toString().trim().ifEmpty { "…" },
             SubtitleOverlay.Tone.DRAFT
