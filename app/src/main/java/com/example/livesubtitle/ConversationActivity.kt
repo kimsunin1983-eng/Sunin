@@ -14,9 +14,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -67,6 +71,12 @@ class ConversationActivity : AppCompatActivity() {
         var ready = false
         val finalizeRunnable = Runnable { finalizeLine(this) }
 
+        // 화면: 이쪽 카드의 제목·상태, 지금 쓰고 있는 말풍선
+        lateinit var titleView: TextView
+        lateinit var stateView: TextView
+        var bubbleOriginal: TextView? = null
+        var bubbleText: TextView? = null
+
         // ── 한 번의 말(턴) 단위 판단: 모든 접근은 메인 스레드 ──
         /** 이 연결이 받아쓴 원문 조각 (도착 시각, 글자) */
         val heard = ArrayList<Pair<Long, String>>()
@@ -91,16 +101,19 @@ class ConversationActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private lateinit var spinnerLeft: Spinner
     private lateinit var spinnerRight: Spinner
-    private lateinit var button: Button
+    private lateinit var buttonTalk: View
+    private lateinit var iconTalk: ImageView
+    private lateinit var buttonEnd: View
     private lateinit var status: TextView
-    private lateinit var log: TextView
+    private lateinit var bubbles: LinearLayout
     private lateinit var scroll: ScrollView
+    private lateinit var wave: WaveView
+    private lateinit var chipWarn: View
 
     @Volatile private var running = false
     @Volatile private var micActive = false
     private var record: AudioRecord? = null
     private var captureThread: Thread? = null
-    private val history = ArrayList<String>()
     private var apiKey = ""
 
     private val permissionLauncher =
@@ -111,35 +124,70 @@ class ConversationActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_conversation)
-        title = "대화 통역"
 
         spinnerLeft = findViewById(R.id.spinnerLeft)
         spinnerRight = findViewById(R.id.spinnerRight)
-        button = findViewById(R.id.buttonTalk)
+        buttonTalk = findViewById(R.id.buttonTalk)
+        iconTalk = findViewById(R.id.iconTalk)
+        buttonEnd = findViewById(R.id.buttonEnd)
         status = findViewById(R.id.textStatus)
-        log = findViewById(R.id.textLog)
+        bubbles = findViewById(R.id.bubbles)
         scroll = findViewById(R.id.scrollLog)
+        wave = findViewById(R.id.wave)
+        chipWarn = findViewById(R.id.chipWarn)
+        left.titleView = findViewById(R.id.textLeftTitle)
+        left.stateView = findViewById(R.id.textLeftState)
+        right.titleView = findViewById(R.id.textRightTitle)
+        right.stateView = findViewById(R.id.textRightState)
 
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first })
+        val adapter = ArrayAdapter(this, R.layout.item_spinner, languages.map { it.first }).apply {
+            setDropDownViewResource(R.layout.item_spinner_dropdown)
+        }
         spinnerLeft.adapter = adapter
         spinnerRight.adapter = adapter
         spinnerLeft.setSelection(prefs.getInt("talkLeft", 1).coerceIn(0, languages.lastIndex))   // 영어
         spinnerRight.setSelection(prefs.getInt("talkRight", 0).coerceIn(0, languages.lastIndex)) // 한국어
+        val onPick = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = updateCards()
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        spinnerLeft.onItemSelectedListener = onPick
+        spinnerRight.onItemSelectedListener = onPick
 
-        status.text = "이어폰을 한쪽씩 나눠 끼고, 폰은 두 사람 사이에 두세요."
-        button.setOnClickListener { if (running) stop("중지했어요.") else start() }
+        findViewById<View>(R.id.buttonBack).setOnClickListener { finish() }
+        findViewById<View>(R.id.buttonSwap).setOnClickListener {
+            if (running) {
+                toast("통역을 종료한 뒤 바꿀 수 있어요.")
+            } else {
+                val l = spinnerLeft.selectedItemPosition
+                spinnerLeft.setSelection(spinnerRight.selectedItemPosition)
+                spinnerRight.setSelection(l)
+            }
+        }
+        buttonTalk.setOnClickListener { if (running) stop("통역을 멈췄어요. 마이크 버튼을 누르면 다시 시작해요.") else start() }
+        buttonEnd.setOnClickListener {
+            if (running) stop("통역을 종료했어요.")
+            finish()
+        }
+        updateCards()
+        updateStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStatus()
     }
 
     override fun onStop() {
         super.onStop()
-        if (running) stop("화면을 벗어나 중지했어요.")
+        if (running) stop("화면을 벗어나 통역을 멈췄어요.")
     }
 
     // ───────────────────────── 시작 / 중지 ─────────────────────────
     private fun start() {
         apiKey = prefs.getString("geminiKey", "").orEmpty().trim()
         if (apiKey.isEmpty()) {
-            toast("먼저 첫 화면에서 Gemini API 키를 입력해 주세요.")
+            toast("먼저 설정에서 Gemini API 키를 입력해 주세요.")
             return
         }
         if (spinnerLeft.selectedItemPosition == spinnerRight.selectedItemPosition) {
@@ -168,7 +216,6 @@ class ConversationActivity : AppCompatActivity() {
         }
         running = true
         recentPlayed.clear()
-        history.clear()
         sides.forEach { side ->
             side.failures = 0
             side.ready = false
@@ -181,6 +228,8 @@ class ConversationActivity : AppCompatActivity() {
             side.pendingAudio.clear()
             side.pendingText.setLength(0)
             side.current.setLength(0)
+            side.bubbleOriginal = null
+            side.bubbleText = null
             side.track = newTrack().also { it.play() }
             side.player = Executors.newSingleThreadExecutor()
             connect(side)
@@ -188,9 +237,13 @@ class ConversationActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         spinnerLeft.isEnabled = false
         spinnerRight.isEnabled = false
-        button.text = "대화 통역 중지"
+        setTalkButton(active = true)
         updateStatus()
-        renderLog()
+    }
+
+    private fun setTalkButton(active: Boolean) {
+        buttonTalk.setBackgroundResource(if (active) R.drawable.bg_circle_teal else R.drawable.bg_circle_ring)
+        iconTalk.setColorFilter(ContextCompat.getColor(this, if (active) R.color.onTeal else R.color.teal))
     }
 
     private fun stop(message: String) {
@@ -211,7 +264,10 @@ class ConversationActivity : AppCompatActivity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         spinnerLeft.isEnabled = true
         spinnerRight.isEnabled = true
-        button.text = "대화 통역 시작"
+        sides.forEach { it.ready = false }
+        setTalkButton(active = false)
+        wave.clear()
+        updateStatus()
         status.text = message
     }
 
@@ -243,6 +299,7 @@ class ConversationActivity : AppCompatActivity() {
                 while (micActive) {
                     val n = r.read(buf, 0, buf.size)
                     if (n <= 0 || !running) continue
+                    wave.push(level(buf, n))
                     left.client?.sendAudio(buf, n)
                     right.client?.sendAudio(buf, n)
                 }
@@ -251,6 +308,19 @@ class ConversationActivity : AppCompatActivity() {
         }
     } catch (e: Exception) {
         false
+    }
+
+    /** 소리 크기를 0~1 로 (물결 표시용) */
+    private fun level(buf: ByteArray, n: Int): Float {
+        var sum = 0.0
+        var i = 0
+        while (i + 1 < n) {
+            val v = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xff)).toShort().toDouble()
+            sum += v * v
+            i += 2
+        }
+        val rms = Math.sqrt(sum / maxOf(1, n / 2))
+        return (rms / 3500.0).toFloat().coerceIn(0f, 1f)
     }
 
     // ───────────────────────── 재생 (한쪽 귀에만) ─────────────────────────
@@ -456,10 +526,24 @@ class ConversationActivity : AppCompatActivity() {
 
     private fun showText(side: Side, delta: String) {
         side.current.append(delta)
-        renderLog()
+        val text = side.current.toString().trim()
+        if (text.isNotEmpty()) {
+            if (side.bubbleText == null) addBubble(side)
+            side.bubbleText?.text = text
+            val original = originalOf(side)
+            side.bubbleOriginal?.apply {
+                this.text = original
+                visibility = if (original.isBlank()) View.GONE else View.VISIBLE
+            }
+            scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+        }
         main.removeCallbacks(side.finalizeRunnable)
         main.postDelayed(side.finalizeRunnable, 2500)
     }
+
+    /** 이번 말의 원문(받아쓰기) */
+    private fun originalOf(side: Side) =
+        side.heard.filter { it.first > side.prevTurnStartAt }.joinToString("") { it.second }.trim()
 
     private fun normalize(t: String) = t.lowercase().filter { it.isLetterOrDigit() }
 
@@ -493,31 +577,92 @@ class ConversationActivity : AppCompatActivity() {
         side.current.setLength(0)
         if (text.isNotEmpty()) {
             recentPlayed += side.lastOutputAt to normalize(text) // 마지막 소리가 온 시각 기준
-            history += lineOf(side, text)
-            while (history.size > 60) history.removeAt(0)
+            HistoryStore.add(this, "대화", text, originalOf(side))
         }
-        renderLog()
+        // 다음 말은 새 말풍선으로
+        side.bubbleOriginal = null
+        side.bubbleText = null
     }
 
-    private fun lineOf(side: Side, text: String) =
-        (if (side.isLeft) "◀ " else "▶ ") + "${side.label} · ${side.langName}\n$text"
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun renderLog() {
-        val sb = StringBuilder()
-        history.forEach { sb.append(it).append("\n\n") }
-        sides.forEach { s ->
-            val cur = s.current.toString().trim()
-            if (cur.isNotEmpty()) sb.append(lineOf(s, cur)).append(" …\n\n")
+    /**
+     * 말풍선 하나 추가. side 는 "번역을 듣는 쪽"이므로 말한 사람은 반대쪽.
+     * 말한 사람 쪽(왼쪽/오른쪽)에 붙여서, 작은 글씨로 원문 + 큰 글씨로 번역을 보여 줌.
+     */
+    private fun addBubble(side: Side) {
+        val speaker = if (side.isLeft) right else left
+        val badge = TextView(this).apply {
+            text = speaker.langCode.substringBefore('-').uppercase().take(2)
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(ContextCompat.getColor(context, if (speaker.isLeft) R.color.teal else R.color.purple))
+            setBackgroundResource(if (speaker.isLeft) R.drawable.bg_badge_teal else R.drawable.bg_badge_purple)
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
         }
-        log.text = sb
-        scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+        val original = TextView(this).apply {
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(context, R.color.textDim))
+            visibility = View.GONE
+        }
+        val translated = TextView(this).apply {
+            textSize = 16f
+            setTextColor(ContextCompat.getColor(context, R.color.text))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        }
+        val bubble = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.bg_bubble)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            addView(original)
+            addView(translated)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (speaker.isLeft) marginStart = dp(8) else marginEnd = dp(8)
+            }
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+                // 말한 사람 쪽으로 붙이고 반대쪽은 비워 둠
+                if (speaker.isLeft) marginEnd = dp(40) else marginStart = dp(40)
+            }
+            if (speaker.isLeft) {
+                addView(badge); addView(bubble)
+            } else {
+                addView(bubble); addView(badge)
+            }
+        }
+        bubbles.addView(row)
+        while (bubbles.childCount > 80) bubbles.removeViewAt(0)
+        side.bubbleOriginal = original
+        side.bubbleText = translated
+    }
+
+    /** 고른 언어를 카드 제목에 반영 */
+    private fun updateCards() {
+        left.titleView.text = "L · " + languages[spinnerLeft.selectedItemPosition.coerceAtLeast(0)].first
+        right.titleView.text = "R · " + languages[spinnerRight.selectedItemPosition.coerceAtLeast(0)].first
     }
 
     private fun updateStatus() {
-        val conn = sides.joinToString("   ") { "${it.label}(${it.langName}) " + if (it.ready) "✅" else "연결 중…" }
-        val warn = if (headphonesConnected()) "" else
-            "\n⚠ 이어폰이 연결되지 않았어요. 폰 스피커로 나오면 마이크가 그 소리를 다시 들어요."
-        status.text = conn + warn
+        val teal = ContextCompat.getColor(this, R.color.teal)
+        val dim = ContextCompat.getColor(this, R.color.textDim)
+        sides.forEach { s ->
+            s.stateView.text = when {
+                !running -> "● 대기 중"
+                s.ready -> "● 연결됨"
+                else -> "● 연결 중…"
+            }
+            s.stateView.setTextColor(if (running && s.ready) teal else dim)
+        }
+        chipWarn.visibility = if (headphonesConnected()) View.GONE else View.VISIBLE
+        if (running) {
+            status.text = if (sides.all { it.ready }) "상대방의 말을 듣고 있어요" else "연결하고 있어요…"
+        }
     }
 
     private fun headphonesConnected(): Boolean {

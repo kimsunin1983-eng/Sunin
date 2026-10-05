@@ -122,7 +122,8 @@ class CaptionService : Service() {
         val wantListen = key.isNotEmpty() && engine == "listen"
         if (key.isNotEmpty() && (wantLive || !langTag.startsWith("ko"))) {
             // 실시간 통역은 언어를 자동 감지하므로 언어 이름을 특정하지 않음
-            val name = if (wantLive) "외국어" else intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag
+            val given = intent.getStringExtra(EXTRA_LANG_NAME) ?: langTag
+            val name = if (wantLive || given == "자동 감지") "외국어" else given
             refiner = GeminiRefiner(key, name)
         }
         showOriginal = prefs.getBoolean("showOriginal", false)
@@ -139,7 +140,10 @@ class CaptionService : Service() {
         }
         isRunning = true
 
-        overlay = SubtitleOverlay(this, showOriginal) { stopSelf() }.also {
+        // Gemini 방식은 언어를 자동으로 알아내고, 기본 방식은 고른 언어로 인식
+        val shownLanguage = if (wantLive || wantListen) "자동 감지" else
+            (intent.getStringExtra(EXTRA_LANG_NAME)?.takeIf { it != "자동 감지" } ?: "영어")
+        overlay = SubtitleOverlay(this, "$shownLanguage → 한국어", showOriginal) { stopSelf() }.also {
             try {
                 it.show()
             } catch (e: Exception) {
@@ -190,8 +194,8 @@ class CaptionService : Service() {
         )
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("실시간 자막 번역 중")
-            .setContentText("자막 창을 두 번 탭하거나 '중지'를 누르면 끝나요.")
+            .setContentTitle("자막 번역 중")
+            .setContentText(if (useSystemAudio) "폰 소리를 번역하고 있어요" else "마이크로 들은 소리를 번역하고 있어요")
             .setContentIntent(openIntent)
             .addAction(0, "중지", stopIntent)
             .setOngoing(true)
@@ -530,6 +534,7 @@ class CaptionService : Service() {
         var draft: String? = null   // Google 초벌 번역
         var refined: String? = null // Gemini 다듬은 번역
         var fromLive = false        // 실시간 통역에서 온 줄
+        var logged = false          // 기록 탭에 저장했는지
         val best get() = refined ?: draft
     }
 
@@ -552,7 +557,20 @@ class CaptionService : Service() {
         render()
     }
 
+    /** 더 바뀔 일이 없는 줄(마지막 줄 제외)을 기록 탭에 저장 */
+    private fun logFinishedLines(includeLast: Boolean = false) {
+        val end = if (includeLast) lines.size else lines.size - 1
+        for (i in 0 until end) {
+            val l = lines[i]
+            if (!l.logged) {
+                l.logged = true
+                l.best?.let { HistoryStore.add(this, "자막", it, l.original) }
+            }
+        }
+    }
+
     private fun render() {
+        logFinishedLines()
         val o = overlay ?: return
         val pOrig = partialOriginal
         if (pOrig != null) {
@@ -879,6 +897,7 @@ class CaptionService : Service() {
 
     // ───────────────────────── 정리 ─────────────────────────
     override fun onDestroy() {
+        runCatching { logFinishedLines(includeLast = true) }
         stopped = true
         isRunning = false
         main.removeCallbacksAndMessages(null)

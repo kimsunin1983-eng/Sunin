@@ -1,8 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="Theme.AppCompat.DayNight.DarkActionBar">
-        <item name="colorPrimary">#1F3A5F</item>
-        <item name="colorPrimaryDark">#152A45</item>
-        <item name="colorAccent">#3D7BD9</item>
+    <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="colorPrimary">@color/bg</item>
+        <item name="colorPrimaryDark">@color/bg</item>
+        <item name="colorAccent">@color/teal</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/textDim</item>
+    </style>
+
+    <style name="SectionLabel">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/textDim</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="RowLabel">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:textColor">@color/text</item>
+        <item name="android:textSize">15sp</item>
+    </style>
+
+    <style name="RowValue">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textColor">@color/textDim</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
+    <style name="Segment">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textColor">@color/textDim</item>
     </style>
 </resources>

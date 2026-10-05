@@ -1,6 +1,9 @@
 package com.example.livesubtitle
 
 import android.Manifest
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
@@ -9,21 +12,29 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.speech.SpeechRecognizer
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
+import android.view.View
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
-import android.widget.RadioButton
+import android.widget.ImageView
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 
+/** 홈 / 기록 / 설정 세 탭을 가진 첫 화면 */
 class MainActivity : AppCompatActivity() {
 
+    /** 영상 언어: (표시 이름, 음성 인식용 코드). "auto" 는 Gemini 방식에서만 가능 */
     private val languages = listOf(
+        "자동 감지" to "auto",
         "영어" to "en-US",
         "일본어" to "ja-JP",
         "중국어 (중국 본토)" to "zh-CN",
@@ -37,26 +48,40 @@ class MainActivity : AppCompatActivity() {
         "러시아어" to "ru-RU",
     )
 
-    private lateinit var spinner: Spinner
-    private lateinit var radioSystem: RadioButton
-    private lateinit var radioMic: RadioButton
-    private lateinit var checkOffline: CheckBox
-    private lateinit var button: Button
-    private lateinit var info: TextView
-    private lateinit var editKey: EditText
-    private lateinit var radioEngine: android.widget.RadioGroup
-    private lateinit var checkOriginal: CheckBox
-
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
+
+    private lateinit var pages: List<View>
+    private lateinit var navIcons: List<ImageView>
+    private lateinit var navTexts: List<TextView>
+    private var currentPage = 0
+
+    // 홈
+    private lateinit var spinnerSource: Spinner
+    private lateinit var buttonStart: TextView
+    private lateinit var segPhone: TextView
+    private lateinit var segMic: TextView
+    private lateinit var chipText: TextView
+    private lateinit var chipDot: View
+    private lateinit var chip: View
+    private lateinit var homeNote: TextView
+
+    // 설정
+    private lateinit var editKey: EditText
+    private lateinit var segEngines: List<TextView>
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-            if (result[Manifest.permission.RECORD_AUDIO] == true) {
-                start()
-            } else {
-                toast("소리를 듣기 위해 '마이크' 권한이 필요해요.")
+            refreshSettings()
+            if (pendingStart) {
+                pendingStart = false
+                if (result[Manifest.permission.RECORD_AUDIO] == true || granted(Manifest.permission.RECORD_AUDIO)) {
+                    startCaption()
+                } else {
+                    toast("소리를 듣기 위해 '마이크' 권한이 필요해요.")
+                }
             }
         }
+    private var pendingStart = false
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -71,108 +96,186 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        migratePrefs()
 
-        spinner = findViewById(R.id.spinnerLang)
-        radioSystem = findViewById(R.id.radioSystem)
-        radioMic = findViewById(R.id.radioMic)
-        checkOffline = findViewById(R.id.checkOffline)
-        button = findViewById(R.id.buttonStart)
-        info = findViewById(R.id.textInfo)
-        editKey = findViewById(R.id.editKey)
-        editKey.setText(prefs.getString("geminiKey", ""))
-        checkOriginal = findViewById(R.id.checkOriginal)
-        checkOriginal.isChecked = prefs.getBoolean("showOriginal", false)
-        radioEngine = findViewById(R.id.radioEngine)
-        radioEngine.check(
-            when (prefs.getString("engine", "live")) {
-                "listen" -> R.id.engineListen
-                "basic" -> R.id.engineBasic
-                else -> R.id.engineLive
-            }
-        )
-        findViewById<Button>(R.id.buttonDiagnose).setOnClickListener { runDiagnosis() }
-        findViewById<Button>(R.id.buttonConversation).setOnClickListener {
-            prefs.edit().putString("geminiKey", editKey.text.toString().trim()).apply()
-            if (CaptionService.isRunning) stopService(Intent(this, CaptionService::class.java))
-            startActivity(Intent(this, ConversationActivity::class.java))
+        pages = listOf(findViewById(R.id.pageHome), findViewById(R.id.pageHistory), findViewById(R.id.pageSettings))
+        navIcons = listOf(findViewById(R.id.navHomeIcon), findViewById(R.id.navHistoryIcon), findViewById(R.id.navSettingsIcon))
+        navTexts = listOf(findViewById(R.id.navHomeText), findViewById(R.id.navHistoryText), findViewById(R.id.navSettingsText))
+        listOf(R.id.navHome, R.id.navHistory, R.id.navSettings).forEachIndexed { i, id ->
+            findViewById<View>(id).setOnClickListener { showPage(i) }
         }
 
-        spinner.adapter = ArrayAdapter(
-            this, android.R.layout.simple_spinner_dropdown_item, languages.map { it.first }
-        )
-        spinner.setSelection(prefs.getInt("lang", 0).coerceIn(0, languages.lastIndex))
-        checkOffline.isChecked = prefs.getBoolean("offline", true)
+        setupHome()
+        setupHistory()
+        setupSettings()
+        showPage(savedInstanceState?.getInt("page") ?: 0)
+    }
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            // 인식기에 오디오를 직접 넘기는 기능은 Android 13부터 지원
-            radioSystem.isEnabled = false
-            radioMic.isChecked = true
-        } else if (prefs.getBoolean("mic", false)) {
-            radioMic.isChecked = true
-        }
-
-        info.text = """
-            사용 방법
-            1. 영상의 언어를 고르고 '자막 시작'을 누르세요.
-            2. 처음에는 권한 몇 가지를 허용해야 해요 (마이크, 다른 앱 위에 표시, 화면 공유).
-               화면 공유 창이 뜨면 '전체 화면'을 고르세요. 화면은 녹화하지 않고 소리만 사용해요.
-            3. 유튜브 등에서 영상을 재생하면 화면 아래에 자막이 나와요.
-
-            자막 창 조작
-            • 끌어서 위치 이동
-            • 두 번 탭하면 종료 (알림창의 '중지'로도 종료)
-
-            참고
-            • Gemini 실시간 통역: 소리를 흘려보내 바로 번역. 데이터를 많이 써요(1시간 200MB 이상). 안 되면 자동으로 '듣기 번역'으로 바뀌어요.
-            • Gemini 듣기 번역: 소리를 문장 단위로 잘라 Gemini가 직접 듣고 번역. 2~4초 늦지만 정확하고 자연스러워요. 언어 자동 감지.
-            • 연결이 안 되면 '연결 진단'을 눌러 결과를 복사해 보내 주세요.
-            • 기본 방식에서는 자막이 세 단계로 바뀌어요: 흐린 글씨(말하는 중) → 조금 흐린 글씨(빠른 초벌 번역) → 선명한 글씨(Gemini가 다듬은 번역).
-            • Gemini 키가 없으면 Google 번역만 써요. 무료 한도를 넘으면 잠시 초벌 번역만 나와요.
-            • 넷플릭스처럼 소리 녹음을 막아 둔 앱은 '폰 소리 직접'이 동작하지 않아요. 이때는 '마이크로 듣기'를 쓰세요.
-            • 자막이 안 나오면 '오프라인 음성 인식 우선 사용'을 끄고 다시 시도해 보세요.
-        """.trimIndent()
-
-        info.setTextIsSelectable(true)
-
-        button.setOnClickListener {
-            if (CaptionService.isRunning) {
-                stopService(Intent(this, CaptionService::class.java))
-                button.postDelayed({ updateButton() }, 300)
-            } else {
-                start()
-            }
-        }
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt("page", currentPage)
     }
 
     override fun onResume() {
         super.onResume()
-        updateButton()
+        refreshHome()
+        refreshSettings()
+        if (currentPage == 1) refreshHistory()
     }
 
-    private fun updateButton() {
-        button.text = if (CaptionService.isRunning) "자막 중지" else "자막 시작"
-        val err = prefs.getString("lastLiveError", null)
-        val base = info.tag as? String ?: info.text.toString().also { info.tag = it }
-        info.text = if (err != null) {
-            "⚠ 최근 실시간 통역 연결 실패 사유 (길게 눌러 복사):\n$err\n\n$base"
-        } else {
-            base
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (currentPage != 0) showPage(0) else super.onBackPressed()
+    }
+
+    /** 예전 버전의 설정값(언어 번호)을 새 형식(언어 코드)으로 옮김 */
+    private fun migratePrefs() {
+        if (!prefs.contains("langCode")) {
+            val code = if (prefs.contains("lang")) {
+                listOf("en-US", "ja-JP", "zh-CN", "zh-TW", "es-ES", "fr-FR", "de-DE", "vi-VN", "th-TH", "id-ID", "ru-RU")
+                    .getOrNull(prefs.getInt("lang", 0))
+            } else {
+                null
+            }
+            // Gemini 키가 있으면 자동 감지가 기본
+            val hasKey = prefs.getString("geminiKey", "").orEmpty().isNotBlank()
+            prefs.edit().putString("langCode", if (hasKey) "auto" else code ?: "auto").apply()
         }
     }
 
-    private fun start() {
-        prefs.edit()
-            .putInt("lang", spinner.selectedItemPosition)
-            .putBoolean("offline", checkOffline.isChecked)
-            .putBoolean("mic", radioMic.isChecked)
-            .putString("geminiKey", editKey.text.toString().trim())
-            .putString("engine", selectedEngine())
-            .putBoolean("showOriginal", checkOriginal.isChecked)
-            .apply()
+    // ───────────────────────── 탭 ─────────────────────────
+    private fun showPage(index: Int) {
+        currentPage = index
+        pages.forEachIndexed { i, v -> v.visibility = if (i == index) View.VISIBLE else View.GONE }
+        val on = ContextCompat.getColor(this, R.color.teal)
+        val off = ContextCompat.getColor(this, R.color.textDim)
+        navIcons.forEachIndexed { i, v -> v.setColorFilter(if (i == index) on else off) }
+        navTexts.forEachIndexed { i, v -> v.setTextColor(if (i == index) on else off) }
+        when (index) {
+            0 -> refreshHome()
+            1 -> refreshHistory()
+            2 -> refreshSettings()
+        }
+    }
 
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            toast("이 폰에 음성 인식 서비스가 없어요. Play 스토어에서 'Google' 앱을 설치/업데이트해 주세요.")
-            return
+    private fun selectSegment(views: List<TextView>, selected: Int) {
+        val on = ContextCompat.getColor(this, R.color.teal)
+        val off = ContextCompat.getColor(this, R.color.textDim)
+        views.forEachIndexed { i, v ->
+            if (i == selected) {
+                v.setBackgroundResource(R.drawable.bg_segment_on)
+                v.setTextColor(on)
+            } else {
+                v.background = null
+                v.setTextColor(off)
+            }
+        }
+    }
+
+    // ───────────────────────── 홈 ─────────────────────────
+    private fun setupHome() {
+        spinnerSource = findViewById(R.id.spinnerSource)
+        buttonStart = findViewById(R.id.buttonStart)
+        segPhone = findViewById(R.id.segPhone)
+        segMic = findViewById(R.id.segMic)
+        chip = findViewById(R.id.chipStatus)
+        chipText = findViewById(R.id.chipText)
+        chipDot = findViewById(R.id.chipDot)
+        homeNote = findViewById(R.id.textHomeNote)
+
+        spinnerSource.adapter = ArrayAdapter(this, R.layout.item_spinner, languages.map { it.first }).apply {
+            setDropDownViewResource(R.layout.item_spinner_dropdown)
+        }
+        spinnerSource.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                prefs.edit().putString("langCode", languages[position].second).apply()
+                refreshHome()
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Android 13 미만은 폰 소리를 인식기에 직접 넘길 수 없음
+        val systemAudioSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+        if (!systemAudioSupported) prefs.edit().putBoolean("mic", true).apply()
+        segPhone.setOnClickListener {
+            if (systemAudioSupported) {
+                prefs.edit().putBoolean("mic", false).apply()
+                refreshHome()
+            } else {
+                toast("폰 소리 직접 가져오기는 Android 13 이상에서 돼요.")
+            }
+        }
+        segMic.setOnClickListener {
+            prefs.edit().putBoolean("mic", true).apply()
+            refreshHome()
+        }
+
+        chip.setOnClickListener { showPage(2) }
+        findViewById<View>(R.id.cardCaption).setOnClickListener { toggleCaption() }
+        buttonStart.setOnClickListener { toggleCaption() }
+        findViewById<View>(R.id.cardConversation).setOnClickListener {
+            if (keyOrEmpty().isEmpty()) {
+                toast("대화 통역에는 Gemini API 키가 필요해요. 설정에서 입력해 주세요.")
+                showPage(2)
+                return@setOnClickListener
+            }
+            if (CaptionService.isRunning) stopService(Intent(this, CaptionService::class.java))
+            startActivity(Intent(this, ConversationActivity::class.java))
+        }
+    }
+
+    private fun refreshHome() {
+        if (!::spinnerSource.isInitialized) return
+        val code = prefs.getString("langCode", "auto")
+        val idx = languages.indexOfFirst { it.second == code }.coerceAtLeast(0)
+        if (spinnerSource.selectedItemPosition != idx) spinnerSource.setSelection(idx)
+
+        selectSegment(listOf(segPhone, segMic), if (prefs.getBoolean("mic", false)) 1 else 0)
+
+        val hasKey = keyOrEmpty().isNotEmpty()
+        chip.setBackgroundResource(if (hasKey) R.drawable.bg_chip else R.drawable.bg_chip_warn)
+        chipDot.setBackgroundResource(if (hasKey) R.drawable.dot_teal else R.drawable.dot_dim)
+        chipText.text = if (hasKey) "연결 준비 완료" else "API 키 필요"
+        chipText.setTextColor(ContextCompat.getColor(this, if (hasKey) R.color.teal else R.color.warn))
+
+        val note = when {
+            effectiveEngine() == "basic" && code == "auto" ->
+                "기본 방식은 언어를 자동으로 알아내지 못해요. 영상의 언어를 골라 주세요."
+            else -> null
+        }
+        homeNote.text = note
+        homeNote.visibility = if (note == null) View.GONE else View.VISIBLE
+
+        buttonStart.text = if (CaptionService.isRunning) "■  자막 번역 중지" else "▶  자막 번역 시작"
+    }
+
+    private fun keyOrEmpty() = prefs.getString("geminiKey", "").orEmpty().trim()
+
+    /** 키가 없으면 Gemini 방식을 쓸 수 없으므로 기본 방식으로 동작 */
+    private fun effectiveEngine(): String =
+        if (keyOrEmpty().isEmpty()) "basic" else prefs.getString("engine", "live") ?: "live"
+
+    private fun toggleCaption() {
+        if (CaptionService.isRunning) {
+            stopService(Intent(this, CaptionService::class.java))
+            buttonStart.postDelayed({ refreshHome() }, 300)
+        } else {
+            startCaption()
+        }
+    }
+
+    private fun startCaption() {
+        val code = prefs.getString("langCode", "auto")
+        if (effectiveEngine() == "basic") {
+            if (code == "auto") {
+                toast("기본 방식은 영상의 언어를 직접 골라야 해요.")
+                return
+            }
+            if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                toast("이 폰에 음성 인식 서비스가 없어요. Play 스토어에서 'Google' 앱을 설치/업데이트해 주세요.")
+                return
+            }
         }
 
         // 1) 마이크(+알림) 권한
@@ -186,6 +289,7 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean("askedNotif", true).apply()
         }
         if (needed.isNotEmpty()) {
+            pendingStart = true
             permissionLauncher.launch(needed.toTypedArray())
             return
         }
@@ -193,14 +297,13 @@ class MainActivity : AppCompatActivity() {
         // 2) 다른 앱 위에 표시 권한
         if (!Settings.canDrawOverlays(this)) {
             toast("'실시간 자막 번역'을 찾아 '다른 앱 위에 표시'를 허용한 뒤 돌아와서 다시 눌러 주세요.")
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
+            openOverlaySettings()
             return
         }
 
-        // 3) 모드별 시작
-        if (radioSystem.isChecked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        // 3) 소리 입력 방식별 시작
+        val useMic = prefs.getBoolean("mic", false) || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+        if (!useMic) {
             val mpm = getSystemService(MediaProjectionManager::class.java)
             projectionLauncher.launch(mpm.createScreenCaptureIntent())
         } else {
@@ -209,60 +312,231 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchService(mode: String, resultCode: Int, data: Intent?) {
+        val code = prefs.getString("langCode", "auto")
+        val lang = languages.firstOrNull { it.second == code } ?: languages[0]
         val intent = Intent(this, CaptionService::class.java).apply {
-            putExtra(CaptionService.EXTRA_LANG, languages[spinner.selectedItemPosition].second)
-            putExtra(CaptionService.EXTRA_LANG_NAME, languages[spinner.selectedItemPosition].first)
+            // 자동 감지일 때 기본 방식으로 넘어가게 되면 영어로 인식
+            putExtra(CaptionService.EXTRA_LANG, if (lang.second == "auto") "en-US" else lang.second)
+            putExtra(CaptionService.EXTRA_LANG_NAME, lang.first)
             putExtra(CaptionService.EXTRA_MODE, mode)
-            putExtra(CaptionService.EXTRA_OFFLINE, checkOffline.isChecked)
+            putExtra(CaptionService.EXTRA_OFFLINE, prefs.getBoolean("offline", true))
             putExtra(CaptionService.EXTRA_RESULT_CODE, resultCode)
             if (data != null) putExtra(CaptionService.EXTRA_RESULT_DATA, data)
         }
         ContextCompat.startForegroundService(this, intent)
-        button.text = "자막 중지"
+        buttonStart.text = "■  자막 번역 중지"
         toast("자막을 시작했어요. 이제 영상 앱을 열어 재생하세요.")
         moveTaskToBack(true)
     }
 
-    private fun selectedEngine() = when (radioEngine.checkedRadioButtonId) {
-        R.id.engineListen -> "listen"
-        R.id.engineBasic -> "basic"
-        else -> "live"
+    // ───────────────────────── 기록 ─────────────────────────
+    private fun setupHistory() {
+        findViewById<View>(R.id.buttonClearHistory).setOnClickListener {
+            AlertDialog.Builder(this)
+                .setMessage("기록을 모두 지울까요?")
+                .setPositiveButton("지우기") { _, _ ->
+                    HistoryStore.clear(this)
+                    refreshHistory()
+                }
+                .setNegativeButton("취소", null)
+                .show()
+        }
+    }
+
+    private fun refreshHistory() {
+        val text = HistoryStore.read(this).trim()
+        val view = findViewById<TextView>(R.id.textHistory)
+        view.text = text.ifEmpty { "아직 기록이 없어요.\n자막 번역이나 대화 통역을 쓰면 번역된 문장이 여기에 쌓여요." }
+        view.setTextColor(ContextCompat.getColor(this, if (text.isEmpty()) R.color.textDim else R.color.text))
+        val scroll = findViewById<ScrollView>(R.id.scrollHistory)
+        scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    // ───────────────────────── 설정 ─────────────────────────
+    private fun setupSettings() {
+        editKey = findViewById(R.id.editKey)
+        editKey.setText(prefs.getString("geminiKey", ""))
+        editKey.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                prefs.edit().putString("geminiKey", s?.toString().orEmpty().trim()).apply()
+            }
+        })
+        val showKey = findViewById<TextView>(R.id.buttonShowKey)
+        var keyVisible = false
+        showKey.setOnClickListener {
+            keyVisible = !keyVisible
+            editKey.inputType = InputType.TYPE_CLASS_TEXT or
+                (if (keyVisible) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else InputType.TYPE_TEXT_VARIATION_PASSWORD)
+            editKey.setSelection(editKey.text.length)
+            showKey.text = if (keyVisible) "숨기기" else "보기"
+        }
+        findViewById<View>(R.id.buttonCheckKey).setOnClickListener { runDiagnosis() }
+        findViewById<View>(R.id.rowDiagnose).setOnClickListener { runDiagnosis() }
+
+        segEngines = listOf(findViewById(R.id.segLive), findViewById(R.id.segListen), findViewById(R.id.segBasic))
+        val engineCodes = listOf("live", "listen", "basic")
+        segEngines.forEachIndexed { i, v ->
+            v.setOnClickListener {
+                prefs.edit().putString("engine", engineCodes[i]).apply()
+                refreshSettings()
+            }
+        }
+
+        findViewById<View>(R.id.rowInput).setOnClickListener {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                toast("폰 소리 직접 가져오기는 Android 13 이상에서 돼요.")
+            } else {
+                prefs.edit().putBoolean("mic", !prefs.getBoolean("mic", false)).apply()
+                refreshSettings()
+            }
+        }
+        findViewById<View>(R.id.rowLanguage).setOnClickListener {
+            val current = languages.indexOfFirst { it.second == prefs.getString("langCode", "auto") }
+            AlertDialog.Builder(this)
+                .setTitle("영상 언어")
+                .setSingleChoiceItems(languages.map { it.first }.toTypedArray(), current) { dialog, which ->
+                    prefs.edit().putString("langCode", languages[which].second).apply()
+                    refreshSettings()
+                    dialog.dismiss()
+                }
+                .show()
+        }
+
+        val switchOriginal = findViewById<SwitchCompat>(R.id.switchOriginal)
+        switchOriginal.isChecked = prefs.getBoolean("showOriginal", false)
+        switchOriginal.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("showOriginal", checked).apply()
+        }
+        findViewById<View>(R.id.rowOriginal).setOnClickListener { switchOriginal.toggle() }
+
+        val switchOffline = findViewById<SwitchCompat>(R.id.switchOffline)
+        switchOffline.isChecked = prefs.getBoolean("offline", true)
+        switchOffline.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("offline", checked).apply()
+        }
+        findViewById<View>(R.id.rowOffline).setOnClickListener { switchOffline.toggle() }
+
+        findViewById<View>(R.id.rowPermMic).setOnClickListener {
+            if (granted(Manifest.permission.RECORD_AUDIO)) openAppSettings()
+            else permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        }
+        findViewById<View>(R.id.rowPermNotif).setOnClickListener {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !granted(Manifest.permission.POST_NOTIFICATIONS)) {
+                permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+            } else {
+                openAppSettings()
+            }
+        }
+        findViewById<View>(R.id.rowPermOverlay).setOnClickListener { openOverlaySettings() }
+        findViewById<View>(R.id.rowLastError).setOnClickListener {
+            val err = prefs.getString("lastLiveError", null)
+            if (err == null) {
+                toast("최근 오류가 없어요.")
+            } else {
+                showCopyDialog("최근 오류", err) {
+                    prefs.edit().remove("lastLiveError").apply()
+                    refreshSettings()
+                }
+            }
+        }
+
+        val version = runCatching { packageManager.getPackageInfo(packageName, 0).versionName }.getOrNull()
+        findViewById<TextView>(R.id.textVersion).text = "버전 ${version ?: "-"}"
+    }
+
+    private fun refreshSettings() {
+        if (!::segEngines.isInitialized) return
+        val engine = prefs.getString("engine", "live")
+        val idx = when (engine) {
+            "listen" -> 1
+            "basic" -> 2
+            else -> 0
+        }
+        selectSegment(segEngines, idx)
+        findViewById<TextView>(R.id.valueEngine).text = listOf("실시간 통역", "듣기 번역", "기본")[idx]
+        val help = when (idx) {
+            0 -> "가장 빠름. Gemini가 소리를 실시간으로 듣고 번역해요. 언어 자동 감지. 데이터를 많이 써요."
+            1 -> "2~4초 늦지만 정확해요. 소리를 문장 단위로 Gemini에 보내요. 언어 자동 감지."
+            else -> "폰 음성 인식 + Google 번역. 키가 있으면 Gemini가 문장을 다듬어요. 영상 언어를 골라야 해요."
+        }
+        val noKey = if (keyOrEmpty().isEmpty() && idx != 2) "\n⚠ API 키가 없어서 지금은 기본 방식으로 동작해요." else ""
+        findViewById<TextView>(R.id.textEngineHelp).text = help + noKey
+
+        findViewById<TextView>(R.id.valueInput).text = if (prefs.getBoolean("mic", false)) "마이크" else "폰 소리"
+        val code = prefs.getString("langCode", "auto")
+        findViewById<TextView>(R.id.valueLanguage).text = languages.firstOrNull { it.second == code }?.first ?: "자동 감지"
+        findViewById<View>(R.id.rowOffline).visibility = if (idx == 2) View.VISIBLE else View.GONE
+
+        setPermission(R.id.valuePermMic, granted(Manifest.permission.RECORD_AUDIO))
+        setPermission(
+            R.id.valuePermNotif,
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || granted(Manifest.permission.POST_NOTIFICATIONS)
+        )
+        setPermission(R.id.valuePermOverlay, Settings.canDrawOverlays(this))
+
+        val err = prefs.getString("lastLiveError", null)
+        findViewById<TextView>(R.id.valueLastError).apply {
+            text = if (err == null) "없음" else "있음 · 눌러서 보기"
+            setTextColor(ContextCompat.getColor(this@MainActivity, if (err == null) R.color.textDim else R.color.warn))
+        }
+    }
+
+    private fun setPermission(id: Int, ok: Boolean) {
+        findViewById<TextView>(id).apply {
+            text = if (ok) "허용됨" else "허용 필요"
+            setTextColor(ContextCompat.getColor(this@MainActivity, if (ok) R.color.teal else R.color.warn))
+        }
+    }
+
+    private fun openOverlaySettings() {
+        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+    }
+
+    private fun openAppSettings() {
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
     /** 키·모델 연결 상태를 검사해 결과를 보여 줌 (복사해서 보낼 수 있게) */
     private fun runDiagnosis() {
-        val key = editKey.text.toString().trim()
+        val key = keyOrEmpty()
         if (key.isEmpty()) {
             toast("먼저 Gemini API 키를 입력하세요.")
             return
         }
-        prefs.edit().putString("geminiKey", key).apply()
-        val progress = android.app.AlertDialog.Builder(this)
-            .setTitle("연결 진단 중…")
+        val progress = AlertDialog.Builder(this)
+            .setTitle("연결 확인 중…")
             .setMessage("최대 30초 정도 걸려요.")
             .setCancelable(false)
             .show()
         Thread {
             val report = Diagnostics.run(key)
             runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 progress.dismiss()
-                val tv = TextView(this).apply {
-                    text = report
-                    setTextIsSelectable(true)
-                    setPadding(48, 24, 48, 0)
-                }
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("연결 진단 결과")
-                    .setView(android.widget.ScrollView(this).apply { addView(tv) })
-                    .setPositiveButton("복사") { _, _ ->
-                        val cm = getSystemService(android.content.ClipboardManager::class.java)
-                        cm.setPrimaryClip(android.content.ClipData.newPlainText("진단 결과", report))
-                        toast("복사했어요. 대화창에 붙여 넣어 주세요.")
-                    }
-                    .setNegativeButton("닫기", null)
-                    .show()
+                showCopyDialog("연결 진단 결과", report, null)
             }
         }.start()
+    }
+
+    private fun showCopyDialog(title: String, body: String, onClear: (() -> Unit)?) {
+        val tv = TextView(this).apply {
+            text = body
+            setTextIsSelectable(true)
+            setPadding(48, 24, 48, 0)
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(ScrollView(this).apply { addView(tv) })
+            .setPositiveButton("복사") { _, _ ->
+                getSystemService(ClipboardManager::class.java)
+                    .setPrimaryClip(ClipData.newPlainText(title, body))
+                toast("복사했어요.")
+            }
+            .setNegativeButton("닫기", null)
+        if (onClear != null) builder.setNeutralButton("지우기") { _, _ -> onClear() }
+        builder.show()
     }
 
     private fun granted(p: String) =

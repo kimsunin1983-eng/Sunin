@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0D1520</color>
+    <color name="surface">#152130</color>
+    <color name="surface2">#1A2838</color>
+    <color name="stroke">#25364A</color>
+    <color name="teal">#4FE3C1</color>
+    <color name="tealDeep">#0F3A3A</color>
+    <color name="purple">#A98BFF</color>
+    <color name="purpleDeep">#2A2552</color>
+    <color name="text">#FFFFFF</color>
+    <color name="textDim">#93A4B8</color>
+    <color name="textFaint">#5F7187</color>
+    <color name="warn">#F2B84B</color>
+    <color name="onTeal">#062A26</color>
+</resources>

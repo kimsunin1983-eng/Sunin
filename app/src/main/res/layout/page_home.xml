@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="28dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="20dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="실시간 번역"
+                    android:textColor="@color/text"
+                    android:textSize="28sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="언어의 경계를 가볍게"
+                    android:textColor="@color/textDim"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/chipStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp">
+
+                <View
+                    android:id="@+id/chipDot"
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:background="@drawable/dot_teal" />
+
+                <TextView
+                    android:id="@+id/chipText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="연결 준비 완료"
+                    android:textColor="@color/teal"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 자막 번역 카드 -->
+        <LinearLayout
+            android:id="@+id/cardCaption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:background="@drawable/bg_card_teal"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="18dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="영상과 오디오"
+                    android:textColor="@color/teal"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="자막 번역"
+                    android:textColor="@color/text"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="보는 화면 위로, 바로 한국어 자막"
+                    android:textColor="@color/textDim"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_caption"
+                android:tint="@color/teal" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_chevron"
+                android:tint="@color/textDim" />
+        </LinearLayout>
+
+        <!-- 대화 통역 카드 -->
+        <LinearLayout
+            android:id="@+id/cardConversation"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card_purple"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="18dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="마주 앉은 두 사람"
+                    android:textColor="@color/purple"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="대화 통역"
+                    android:textColor="@color/text"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="이어폰으로 듣는 서로의 언어"
+                    android:textColor="@color/textDim"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_headset"
+                android:tint="@color/purple" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginStart="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_chevron"
+                android:tint="@color/textDim" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/SectionLabel"
+            android:layout_marginTop="22dp"
+            android:text="소리 입력" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_input"
+            android:orientation="horizontal"
+            android:padding="4dp">
+
+            <TextView
+                android:id="@+id/segPhone"
+                style="@style/Segment"
+                android:text="🔊  폰 소리" />
+
+            <TextView
+                android:id="@+id/segMic"
+                style="@style/Segment"
+                android:text="🎤  마이크" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/SectionLabel"
+            android:layout_marginTop="18dp"
+            android:text="번역할 언어" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <FrameLayout
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_input"
+                android:paddingStart="8dp"
+                android:paddingEnd="4dp">
+
+                <Spinner
+                    android:id="@+id/spinnerSource"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@null"
+                    android:popupBackground="@color/surface2" />
+            </FrameLayout>
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_swap"
+                android:tint="@color/textDim" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_input"
+                android:gravity="center_vertical"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:text="한국어"
+                android:textColor="@color/text"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/textHomeNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textColor="@color/warn"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/buttonStart"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/bg_button_primary"
+            android:gravity="center"
+            android:text="▶  자막 번역 시작"
+            android:textColor="@color/onTeal"
+            android:textSize="17sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+</ScrollView>

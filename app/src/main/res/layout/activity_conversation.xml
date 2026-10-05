@@ -2,88 +2,279 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/bg"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:paddingStart="20dp"
+    android:paddingTop="20dp"
+    android:paddingEnd="20dp"
+    android:paddingBottom="16dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:id="@+id/buttonBack"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="뒤로"
+            android:padding="8dp"
+            android:src="@drawable/ic_back"
+            android:tint="@color/text" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:text="대화 통역"
+            android:textColor="@color/text"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_input"
+            android:paddingStart="8dp"
+            android:paddingEnd="4dp">
+
+            <Spinner
+                android:id="@+id/spinnerLeft"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@null"
+                android:popupBackground="@color/surface2" />
+        </FrameLayout>
+
+        <ImageView
+            android:id="@+id/buttonSwap"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:contentDescription="좌우 언어 바꾸기"
+            android:padding="9dp"
+            android:src="@drawable/ic_swap"
+            android:tint="@color/textDim" />
+
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_input"
+            android:paddingStart="8dp"
+            android:paddingEnd="4dp">
+
+            <Spinner
+                android:id="@+id/spinnerRight"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@null"
+                android:popupBackground="@color/surface2" />
+        </FrameLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
         android:baselineAligned="false"
         android:orientation="horizontal">
 
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:background="@drawable/bg_card_teal"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="14dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_headset"
+                android:tint="@color/teal" />
+
+            <LinearLayout
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="◀ 왼쪽 이어폰 사람"
-                android:textStyle="bold" />
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-            <Spinner
-                android:id="@+id/spinnerLeft"
-                android:layout_width="match_parent"
-                android:layout_height="48dp" />
+                <TextView
+                    android:id="@+id/textLeftTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="L · 영어"
+                    android:textColor="@color/text"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/textLeftState"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="● 대기 중"
+                    android:textColor="@color/textDim"
+                    android:textSize="12sp" />
+            </LinearLayout>
         </LinearLayout>
 
         <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
+            android:layout_marginStart="6dp"
             android:layout_weight="1"
-            android:orientation="vertical">
+            android:background="@drawable/bg_card_purple"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="14dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:text="오른쪽 이어폰 사람 ▶"
-                android:textStyle="bold" />
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-            <Spinner
-                android:id="@+id/spinnerRight"
-                android:layout_width="match_parent"
-                android:layout_height="48dp" />
+                <TextView
+                    android:id="@+id/textRightTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="R · 한국어"
+                    android:textColor="@color/text"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/textRightState"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="● 대기 중"
+                    android:textColor="@color/textDim"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:layout_marginStart="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_headset"
+                android:tint="@color/purple" />
         </LinearLayout>
     </LinearLayout>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="각자 자기 언어를 고르세요. 상대방 말이 내 언어로 번역되어 내 쪽 이어폰에서만 들려요."
+        android:layout_marginTop="14dp"
+        android:gravity="center"
+        android:text="휴대폰을 두 사람 사이에 놓아 주세요"
+        android:textColor="@color/textDim"
         android:textSize="13sp" />
 
-    <Button
-        android:id="@+id/buttonTalk"
+    <com.example.livesubtitle.WaveView
+        android:id="@+id/wave"
         android:layout_width="match_parent"
-        android:layout_height="56dp"
-        android:layout_marginTop="12dp"
-        android:text="대화 통역 시작"
-        android:textSize="17sp" />
+        android:layout_height="52dp"
+        android:layout_marginTop="8dp" />
 
     <TextView
         android:id="@+id/textStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
+        android:gravity="center"
+        android:text="마이크 버튼을 눌러 시작하세요"
+        android:textColor="@color/text"
         android:textSize="14sp" />
+
+    <TextView
+        style="@style/SectionLabel"
+        android:layout_marginTop="12dp"
+        android:text="대화 기록" />
 
     <ScrollView
         android:id="@+id/scrollLog"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="6dp"
         android:layout_weight="1">
 
-        <TextView
-            android:id="@+id/textLog"
+        <LinearLayout
+            android:id="@+id/bubbles"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:lineSpacingExtra="3dp"
-            android:textIsSelectable="true"
-            android:textSize="16sp" />
+            android:orientation="vertical"
+            android:paddingBottom="8dp" />
     </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <FrameLayout
+            android:id="@+id/buttonTalk"
+            android:layout_width="68dp"
+            android:layout_height="68dp"
+            android:background="@drawable/bg_circle_ring"
+            android:contentDescription="대화 통역 시작">
+
+            <ImageView
+                android:id="@+id/iconTalk"
+                android:layout_width="30dp"
+                android:layout_height="30dp"
+                android:layout_gravity="center"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_mic"
+                android:tint="@color/teal" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/buttonEnd"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="20dp"
+            android:background="@drawable/bg_button_ghost"
+            android:gravity="center"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:text="■  통역 종료"
+            android:textColor="@color/text"
+            android:textSize="15sp" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/chipWarn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_chip_warn"
+        android:gravity="center"
+        android:paddingStart="14dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="8dp"
+        android:text="ⓘ  이어폰이 연결되지 않았어요. 연결하고 한쪽씩 나눠 끼세요"
+        android:textColor="@color/warn"
+        android:textSize="12sp"
+        android:visibility="gone" />
 </LinearLayout>
