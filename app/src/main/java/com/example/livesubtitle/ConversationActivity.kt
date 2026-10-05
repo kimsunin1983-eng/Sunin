@@ -34,8 +34,8 @@ import kotlin.concurrent.thread
  *  폰 마이크 ──┬─▶ Gemini 실시간 번역 (→ 왼쪽 사람 언어) ─▶ 왼쪽 이어폰에만 재생
  *              └─▶ Gemini 실시간 번역 (→ 오른쪽 사람 언어) ─▶ 오른쪽 이어폰에만 재생
  *
- * 각 연결은 "이미 그 언어로 말한 것"은 따라 말하지 않도록 설정(echoTargetLanguage=false)하고,
- * 서버가 알려 준 입력 언어가 목표 언어와 같으면 앱에서도 한 번 더 막는다.
+ * 각 연결은 자기 언어로 들어온 말은 그대로 따라 말하는데(echoTargetLanguage=true),
+ * 앱이 받아쓰기 글자로 말한 언어를 판단해 그 언어 쪽 귀의 소리를 막는다.
  */
 class ConversationActivity : AppCompatActivity() {
 
@@ -343,7 +343,9 @@ class ConversationActivity : AppCompatActivity() {
                 }
             },
             targetLanguage = side.langCode,
-            echoTarget = false,
+            // false 로 두면 모델이 번역 대신 대답을 지어내는 일이 있어 true(따라 말하기)로 두고,
+            // 따라 말한 소리는 앱이 shouldMute 로 막는다
+            echoTarget = true,
         )
         side.client = client
         client.connect()
