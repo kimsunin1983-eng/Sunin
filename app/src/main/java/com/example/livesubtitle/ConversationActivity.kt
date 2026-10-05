@@ -135,8 +135,12 @@ class ConversationActivity : AppCompatActivity() {
         }
         spinnerLeft.adapter = adapter
         spinnerRight.adapter = adapter
-        spinnerLeft.setSelection(prefs.getInt("talkLeft", 1).coerceIn(0, languages.lastIndex))   // 영어
-        spinnerRight.setSelection(prefs.getInt("talkRight", 0).coerceIn(0, languages.lastIndex)) // 한국어
+        // 기본: 상대(왼쪽)는 자동 감지, 나(오른쪽)는 한국어. 목록 순서가 바뀌어도 어긋나지 않게 언어 코드로 기억
+        fun indexOf(code: String?, fallback: String) =
+            languages.indexOfFirst { it.code == code }.takeIf { it >= 0 }
+                ?: languages.indexOfFirst { it.code == fallback }
+        spinnerLeft.setSelection(indexOf(prefs.getString("talkLeftCode", AUTO), AUTO))
+        spinnerRight.setSelection(indexOf(prefs.getString("talkRightCode", "ko"), "ko"))
         val onPick = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = updateCards()
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -267,8 +271,8 @@ class ConversationActivity : AppCompatActivity() {
             return
         }
         prefs.edit()
-            .putInt("talkLeft", spinnerLeft.selectedItemPosition)
-            .putInt("talkRight", spinnerRight.selectedItemPosition)
+            .putString("talkLeftCode", languages[spinnerLeft.selectedItemPosition].code)
+            .putString("talkRightCode", languages[spinnerRight.selectedItemPosition].code)
             .apply()
         left.lang = languages[spinnerLeft.selectedItemPosition]
         right.lang = languages[spinnerRight.selectedItemPosition]
@@ -502,7 +506,6 @@ class ConversationActivity : AppCompatActivity() {
             isChecked = wantAffective
         }
         val notesEdit = android.widget.EditText(this).apply {
-            hint = "예: 내 이름 김민서, 호텔 Clark Marriott"
             setText(notes)
             maxLines = 3
         }
