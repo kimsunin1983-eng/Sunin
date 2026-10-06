@@ -740,7 +740,8 @@ class ConversationActivity : AppCompatActivity() {
     private var lastInputAt = 0L
     /** 이미 문장 단위 방식에 넘긴 말에 대해 실시간 번역이 뒤늦게 시작된 시각 */
     private var orphanTurnAt = 0L
-    /** 놓친 말을 문장 단위 방식에 넘긴 시각과, 마지막으로 넘긴 것이 그 경우였는지 */
+    private var turnIsOrphan = false
+    /** 놓친 말을 문장 단위 방식에 마지막으로 넘긴 시각 */
     private var unansweredSentAt = 0L
 
     private fun clearHeard() {
@@ -888,9 +889,14 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     /** 문장 단위 방식으로 되살린 번역을 보여 주고 들려줌. sentAt: 놓친 말로 넘긴 시각 (표시 문구·대답 때문에 넘긴 것이면 0) */
-    private fun showRescued(mine: Int, sentAt: Long, speakerIsA: Boolean, src: String, out: String) {
+    private fun showRescued(mine: Int, sentAt: Long, speakerIsA: Boolean, src: String, out: String, tries: Int = 0) {
         if (!running || !fastMode || mine != session) return
         if (sentAt != 0L) {
+            // 실시간 번역이 막 시작돼 아직 들려줄지 정하는 중이면 잠깐 기다렸다가 판단 (최대 3초)
+            if (liveTurnOpen && turnIsOrphan && ear == null && tries < 10) {
+                main.postDelayed({ showRescued(mine, sentAt, speakerIsA, src, out, tries + 1) }, 300)
+                return
+            }
             // 놓친 말이라 여겨 넘긴 것: 그사이 실시간 모델이 그 말을 뒤늦게 번역했거나(같은 말이 두 번 들림),
             // 결과가 너무 늦게 왔으면 버림
             val late = SystemClock.elapsedRealtime() - sentAt > 10_000
@@ -1107,17 +1113,21 @@ class ConversationActivity : AppCompatActivity() {
         if (!liveTurnOpen) {
             liveTurnOpen = true
             turnOpenedAt = now
-            // 5초 넘게 묵은 받아쓰기는 이번 말의 것이 아님
-            if (now - lastInputAt > 5000) clearHeard()
-            if (!speechBuffer.beginTurn(now)) orphanTurnAt = now
+            // 5초 넘게 묵은 받아쓰기는 이번 말의 것이 아님 (번역문의 언어는 방금 온 것일 수 있어 건드리지 않음)
+            if (now - lastInputAt > 5000) {
+                liveIn.setLength(0)
+                turnInLang = null
+            }
+            // 새로 한 말이 없는데 번역이 시작됨 = 이미 문장 단위 방식에 넘긴 말을 뒤늦게 번역하는 것일 수 있음
+            turnIsOrphan = !speechBuffer.beginTurn(now, unansweredSentAt)
             main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
         main.removeCallbacks(turnIdle)
         // 소리는 재생보다 빨리 도착하고, 서버의 종료 신호는 재생이 끝날 즈음에 올 수 있음
         // → 받은 소리가 다 재생될 시각 + 2초까지는 기다림 (최소 4초)
-        // (아직 귀를 못 정해 소리를 붙잡고 있는 중이면 재생 중이 아니므로 4초)
-        val playbackLeft = if (ear == null) 0L else turnOpenedAt + turnAudioMs - now
+        // (소리를 붙잡고 있는 중에도 같음: 서버는 재생된다고 보고 그만큼 뒤에 종료 신호를 보냄)
+        val playbackLeft = turnOpenedAt + turnAudioMs - now
         main.postDelayed(turnIdle, maxOf(4000L, playbackLeft + 2000L).coerceAtMost(25_000L))
     }
 
@@ -1166,6 +1176,8 @@ class ConversationActivity : AppCompatActivity() {
         }
         main.removeCallbacks(earTimeout)
         ear = decided
+        // 실제로 들려주게 된 시점에 표시 (표시 문구나 대답이라 버려지는 번역은 '늦은 번역'으로 치지 않음)
+        if (turnIsOrphan) orphanTurnAt = SystemClock.elapsedRealtime()
         heldAudio.forEach { play(it, decided) }
         heldAudio.clear()
         heldAudioBytes = 0
@@ -1384,6 +1396,7 @@ class ConversationActivity : AppCompatActivity() {
         turnInLang = null
         turnOutLang = null
         turnAudioMs = 0L
+        turnIsOrphan = false
 
         turnSeq++
         lastLiveOutputAt = 0L

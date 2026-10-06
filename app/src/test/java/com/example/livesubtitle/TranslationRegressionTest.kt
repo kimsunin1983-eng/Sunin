@@ -216,6 +216,22 @@ class TranslationRegressionTest {
         assertEquals(1200, c.buffer.lastSpeechMs)
     }
 
+    @Test fun lateAnswerToHandedOverSpeechIsRecognisedDespiteStrayNoise() {
+        val c = Capture()
+        c.feed(12, true, 1); c.feed(8, false)
+        c.feed(4, true); c.feed(8, false)          // 넘기기 전부터 남아 있던 짧은 소리
+        c.now += 3000
+        val sentAt = c.now
+        assertNotNull(c.buffer.pollUnanswered(sentAt, 3500))
+        c.now += 500
+        // 새로 한 말 없이 번역이 시작됨 → 넘긴 말에 대한 늦은 번역
+        assertFalse(c.buffer.beginTurn(c.now, sentAt))
+        c.buffer.finishTurn()
+        // 넘긴 뒤에 새로 말한 것이 있으면 새 말의 번역
+        c.feed(8, true, 2); c.feed(8, false)
+        assertTrue(c.buffer.beginTurn(c.now, sentAt))
+    }
+
     @Test fun answeredSpeechIsNotHandedOver() {
         val c = Capture()
         c.feed(12, true, 1); c.feed(8, false)

@@ -90,6 +90,27 @@ class EarPolicyTest {
         assertEquals(RIGHT, decide("ko", "ja", "ありがとうございます"))
     }
 
+    @Test fun serverLanguageNeverOverridesAClearScript() {
+        assertEquals(RIGHT, decide("latin", "ko", "안녕하세요", lang = LEFT))
+        assertEquals(LEFT, decide("latin", "ko", "Hello, nice to meet you.", lang = RIGHT))
+    }
+
+    @Test fun otherScripts() {
+        assertEquals(LEFT, decide("thai", "ko", "สวัสดีครับ"))
+        assertEquals(RIGHT, decide("thai", "ko", "안녕하세요"))
+        assertEquals(LEFT, decide("cyr", "ko", "Здравствуйте"))
+        assertEquals(RIGHT, decide("han", "ko", "안녕하세요"))
+        assertEquals(LEFT, decide("han", "ko", "你好，很高兴认识你"))
+        assertEquals(SUSPECT, decide("ja", "ko", "トイレはあちらです", heard = "トイレはどこですか"))
+        assertEquals(RIGHT, decide("ko", "latin", "Hello my friend, how are you", rightAuto = true))
+        assertEquals(LEFT, decide("ko", "latin", "안녕하세요", rightAuto = true))
+    }
+
+    @Test fun fifteenLetterBoundaryForLatinOnlyText() {
+        assertEquals(WAIT, decide("latin", "ko", "abcdefghijklmn"))   // 14자
+        assertEquals(LEFT, decide("latin", "ko", "abcdefghijklmno")) // 15자
+    }
+
     // ── 한쪽 자동 감지 ──
     @Test fun autoSide() {
         assertEquals(RIGHT, decide("latin", "ko", "안녕하세요", leftAuto = true))

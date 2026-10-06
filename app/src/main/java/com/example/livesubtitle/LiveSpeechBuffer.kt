@@ -100,8 +100,12 @@ internal class LiveSpeechBuffer {
         waiting.removeAll { now - it.endedAt >= olderThanMs && (!it.usable || it.speechBytes < RESCUE_SPEECH_BYTES) }
     }
 
-    /** @return 이 번역에 대응할 만한 말소리가 하나라도 있었는지 (없으면 이미 다른 곳으로 넘긴 말에 대한 늦은 번역일 수 있음) */
-    @Synchronized fun beginTurn(now: Long): Boolean {
+    /**
+     * @param since 이 시각 뒤에 시작된 말소리만 '새로 한 말'로 침 (놓친 말을 다른 곳으로 넘긴 시각)
+     * @return 이 번역에 대응할 새 말소리가 있었는지. 없으면 이미 넘긴 말에 대한 늦은 번역일 수 있음.
+     *         (그 전부터 남아 있던 짧은 소리나 잡음은 새 말로 치지 않음)
+     */
+    @Synchronized fun beginTurn(now: Long, since: Long = 0L): Boolean {
         if (turnOpen) return true
         turnOpen = true
         val candidates = waiting.toList() + listOfNotNull(active?.takeUnless { it.claimed })
@@ -110,7 +114,7 @@ internal class LiveSpeechBuffer {
         selected?.duringTurn = false // 이 번역의 주인으로 정해진 소리는 겹친 말로 세지 않음
         candidates.forEach { it.claimed = true }
         waiting.clear()
-        return candidates.isNotEmpty()
+        return candidates.any { it.startedAt > since && it.speechBytes >= NOISE_BYTES }
     }
 
     /** Only call for server turnComplete. Disconnects and interruptions cancel instead. */
