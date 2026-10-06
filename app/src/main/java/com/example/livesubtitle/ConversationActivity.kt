@@ -666,6 +666,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (fatal) stop(message) else {
                         status.text = message
                         steadyErrorUntil = SystemClock.elapsedRealtime() + 4000
+                        main.postDelayed({ refreshSteadyStatus() }, 4100)
                     }
                 }
             },
@@ -736,6 +737,28 @@ class ConversationActivity : AppCompatActivity() {
     private var turnAudioMs = 0L
     private var turnOpenedAt = 0L
     private var netWaiting = false
+    private var lastInputAt = 0L
+    /** 통역 대신 대답한 것으로 의심되는 번역 (말이 끝날 때 확정) */
+    private var answerSuspect = false
+    /** 놓친 말을 문장 단위 방식에 넘긴 시각과, 마지막으로 넘긴 것이 그 경우였는지 */
+    private var unansweredSentAt = 0L
+    private var lastRescueWasUnanswered = false
+
+    private fun clearHeard() {
+        liveIn.setLength(0)
+        turnInLang = null
+        turnOutLang = null
+    }
+
+    /**
+     * 번역이 나오지 않은 채 2.5초 넘게 지난 뒤 새로 들어오는 받아쓰기면, 남아 있던 것은 앞 사람의 말.
+     * 지우지 않으면 다음 사람의 번역을 '같은 언어로 대답한 것'으로 잘못 볼 수 있음
+     */
+    private fun freshenInput() {
+        val now = SystemClock.elapsedRealtime()
+        if (!liveTurnOpen && now - lastInputAt > 2500) clearHeard()
+        lastInputAt = now
+    }
     private var lastCheckAt = 0L
 
     /** NONE: 번역이 아닌 출력이라 버림 */
@@ -788,8 +811,13 @@ class ConversationActivity : AppCompatActivity() {
                     renewLive(null)
                 }
                 // 말이 끝난 지 3.5초가 지나도록 번역이 시작되지 않은 말 → 문장 단위 방식으로 대신 통역
-                if (live?.isReady == true) {
-                    speechBuffer.pollUnanswered(now, 3500)?.let { rescue?.submitClip(it) }
+                if (live?.isReady == true && rescue != null && quietFor >= 3000 && now - unansweredSentAt >= 4000) {
+                    speechBuffer.pollUnanswered(now, 3500)?.let {
+                        unansweredSentAt = now
+                        lastRescueWasUnanswered = true
+                        clearHeard()
+                        rescue?.submitClip(it)
+                    }
                 }
             }
             main.postDelayed(this, 1000)
@@ -833,6 +861,12 @@ class ConversationActivity : AppCompatActivity() {
                     override fun onError(message: String, fatal: Boolean) {}
                     override fun onResult(speakerIsA: Boolean, src: String, out: String) = ui {
                         if (!running || !fastMode || mine != session) return@ui
+                        if (lastRescueWasUnanswered) {
+                            // 놓친 말이라 여겨 넘겼는데 그사이 실시간 번역이 나왔거나(같은 말이 두 번 들림),
+                            // 결과가 너무 늦게 왔으면 버림
+                            val late = SystemClock.elapsedRealtime() - unansweredSentAt > 10_000
+                            if (turnOpenedAt > unansweredSentAt || late) return@ui
+                        }
                         val speaker = if (speakerIsA) left else right
                         addBubble(speaker, src, out)
                         if (speakerMode) {
@@ -958,7 +992,9 @@ class ConversationActivity : AppCompatActivity() {
                 }
 
                 override fun onInputText(delta: String) = ui {
-                    if (live === client) liveIn.append(delta)
+                    if (live !== client) return@ui
+                    freshenInput()
+                    liveIn.append(delta)
                 }
 
                 override fun onOutputText(delta: String) = ui {
@@ -971,7 +1007,9 @@ class ConversationActivity : AppCompatActivity() {
                 }
 
                 override fun onInputLanguage(code: String) = ui {
-                    if (live === client) turnInLang = code
+                    if (live !== client) return@ui
+                    freshenInput()
+                    turnInLang = code
                 }
 
                 override fun onOutputLanguage(code: String) = ui {
@@ -996,7 +1034,7 @@ class ConversationActivity : AppCompatActivity() {
                 override fun onTurnComplete() = ui {
                     if (live !== client) return@ui
                     // 안전장치가 이미 닫은 말에 대한 늦은 종료 신호면 받아쓴 글자만 비움
-                    if (liveTurnOpen) endLiveTurn(confirmed = true) else liveIn.setLength(0)
+                    if (liveTurnOpen) endLiveTurn(confirmed = true) else clearHeard()
                 }
 
                 override fun onInterrupted() = ui {
@@ -1019,11 +1057,14 @@ class ConversationActivity : AppCompatActivity() {
                     endLiveTurn(confirmed = false)
                     if (gotOutput || error == null || error == "goAway") {
                         main.postDelayed({ connectLive() }, 300) // 세션 시간 제한 등 → 다시 연결
-                    } else if (NETWORK_ERROR.containsMatchIn(error.orEmpty())) {
+                    } else if (!error.orEmpty().startsWith("(") && !error.orEmpty().startsWith("HTTP ") &&
+                        NETWORK_ERROR.containsMatchIn(error.orEmpty())
+                    ) {
                         // 인터넷이 끊긴 경우는 실패로 세지 않고 돌아올 때까지 기다림
                         netWaiting = true
                         main.postDelayed({ connectLive() }, 2000)
                     } else {
+                        netWaiting = false
                         liveFailures++
                         // 서버가 설정·모델을 거절한 경우에만 다른 조합으로 넘어감.
                         // 네트워크 끊김 같은 일시 오류에 조합을 바꾸면 잘 되던 설정을 잃어버림
@@ -1068,7 +1109,7 @@ class ConversationActivity : AppCompatActivity() {
         // 소리는 재생보다 빨리 도착하고, 서버의 종료 신호는 재생이 끝날 즈음에 올 수 있음
         // → 받은 소리가 다 재생될 시각 + 2초까지는 기다림 (최소 4초)
         val playbackLeft = turnOpenedAt + turnAudioMs - now
-        main.postDelayed(turnIdle, maxOf(4000L, playbackLeft + 2000L))
+        main.postDelayed(turnIdle, maxOf(4000L, playbackLeft + 2000L).coerceAtMost(25_000L))
     }
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
@@ -1097,11 +1138,11 @@ class ConversationActivity : AppCompatActivity() {
             // 들은 말에 알파벳이 섞여 있으면(앞 사람 말이 섞였을 수 있음) 단정하지 않음
             inText.count { it in 'a'..'z' || it in 'A'..'Z' } < 4
         ) {
-            main.removeCallbacks(earTimeout)
-            heldAudio.clear()
-            heldAudioBytes = 0
-            ear = Ear.NONE
-            return
+            // 바로 버리지 않고 붙잡아 둠. 말이 끝났을 때 다시 통역할 소리가 있으면 버리고, 없으면 그대로 들려줌
+            answerSuspect = true
+            if (!final) return
+        } else {
+            answerSuspect = false
         }
 
         // 소리만 먼저 오고 글자가 아직 하나도 없으면 양쪽 귀에 틀지 말고 조금 더 기다림 (최대 3초)
@@ -1122,7 +1163,10 @@ class ConversationActivity : AppCompatActivity() {
         }
         // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
         // 다만 "네", "Yes" 처럼 짧게 끝난 말은 마지막 판단(force) 때 있는 글자로 정함
-        val enough = force || letters >= 4
+        val shortButDone = script == "latin" && letters >= 2 &&
+            text.trimEnd().lastOrNull() in setOf('.', '?', '!') &&
+            inScript != null && inScript != "latin" && inScript in pair
+        val enough = force || letters >= 4 || shortButDone
         // 서버가 언어를 알려 줬으면, 글자로 구분할 수 없을 때 그것으로 귀를 정함
         val byLanguage: Ear? = sideOfLanguage(turnOutLang)?.let { if (it.isLeft) Ear.LEFT else Ear.RIGHT }
             ?: sideOfLanguage(turnInLang)?.let { if (it.isLeft) Ear.RIGHT else Ear.LEFT }
@@ -1251,7 +1295,10 @@ class ConversationActivity : AppCompatActivity() {
         main.removeCallbacks(earTimeout)
         ear = Ear.NONE
 
-        if (pcm != null && pcm.size >= 32 * 100) rescue?.submitClip(pcm)
+        if (pcm != null && pcm.size >= 32 * 100) {
+            lastRescueWasUnanswered = false
+            rescue?.submitClip(pcm)
+        }
 
     }
 
@@ -1285,7 +1332,7 @@ class ConversationActivity : AppCompatActivity() {
         if (pcm == null) return
         // 아주 짧은 말은 검산하지 않고, 요청 사이에 3초 간격을 둠 (무료 사용량 한도 보호)
         val nowMs = SystemClock.elapsedRealtime()
-        if (liveOut.count { it.isLetter() } < 6 || nowMs - lastCheckAt < 3000) return
+        if (pcm.size < 32000 || nowMs - lastCheckAt < 3000) return // 1초 미만의 말은 건너뜀
         lastCheckAt = nowMs
         val worker = transcriber ?: return
         val target = views.first
@@ -1331,6 +1378,11 @@ class ConversationActivity : AppCompatActivity() {
             null
         }
         val placeholder = LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)
+        if (ear == null && answerSuspect && pcm != null && pcm.size >= 32 * 300) {
+            heldAudio.clear()
+            heldAudioBytes = 0
+            ear = Ear.NONE // 아래에서 버리고 문장 단위 방식으로 다시 통역
+        }
         if (ear == null && !placeholder && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) {
             // 확인되지 않은 종료(연결 끊김 등)에서는 표시 문구처럼 보여도 버리지 않고 들려줌
             chooseEar(force = true, final = true, allowSuspicious = !confirmed)
@@ -1369,6 +1421,7 @@ class ConversationActivity : AppCompatActivity() {
         turnInLang = null
         turnOutLang = null
         turnAudioMs = 0L
+        answerSuspect = false
         turnSeq++
         lastLiveOutputAt = 0L
     }
@@ -1593,9 +1646,9 @@ class ConversationActivity : AppCompatActivity() {
         headphones = headphonesConnected()
         chipWarn.visibility = if (headphones) View.GONE else View.VISIBLE
         (chipWarn as? TextView)?.text = if (speakerMode) {
-            "이어폰이 연결되지 않았어요. 이어폰을 연결해 양쪽 모두 끼세요"
+            "ⓘ  이어폰이 연결되지 않았어요. 이어폰을 연결해 양쪽 모두 끼세요"
         } else {
-            "이어폰이 연결되지 않았어요. 연결하고 한쪽씩 나눠 끼세요"
+            "ⓘ  이어폰이 연결되지 않았어요. 연결하고 한쪽씩 나눠 끼세요"
         }
         if (running) {
             if (fastMode) {
@@ -1646,7 +1699,7 @@ class ConversationActivity : AppCompatActivity() {
         /** 인터넷이 끊겼을 때의 오류 문구 */
         private val NETWORK_ERROR = Regex(
             "unable to resolve host|unknownhost|failed to connect|timeout|timed out|network is unreachable|" +
-                "connection abort|connection reset|broken pipe|no route to host|socket closed",
+                "connection abort|connection reset|broken pipe|no route to host|socket closed|socket is closed|receive pong",
             RegexOption.IGNORE_CASE
         )
         private val CONFIG_ERROR = Regex(

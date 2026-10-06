@@ -498,10 +498,17 @@ object Scripts {
         val otherCount = ko + kana + han + cyr + thai
         return when {
             // 단, 알파벳 문장 속의 이름 한두 글자("I'm at 강남 station")는 알파벳 언어로 둠
-            (otherCount >= 2 && otherCount * 4 >= latin) || (otherCount == 1 && latin <= 3) -> other.first
+            // 알파벳이 훨씬 많더라도 문장이 다른 글자로 끝나면("Starbucks 가요", "Starbucksです") 그 언어의 문장
+            (otherCount >= 2 && (otherCount * 4 >= latin || endsNonLatin(text))) ||
+                (otherCount == 1 && latin <= 3) -> other.first
             latin > 0 -> "latin"
             else -> null
         }
+    }
+
+    private fun endsNonLatin(text: String): Boolean {
+        val last = text.lastOrNull { it.isLetter() } ?: return false
+        return !(last in 'a'..'z' || last in 'A'..'Z' || last in 'À'..'ɏ' || last in 'Ḁ'..'ỿ')
     }
 
     /** 알파벳과 다른 글자가 모두 꽤 섞여 있는지 (글자 종류만으로 말한 사람을 단정하기 어려움) */

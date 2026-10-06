@@ -168,6 +168,10 @@ class TranslationRegressionTest {
             "スターバックスに行きましょう" to "ja",
             "Let's meet at Starbucks" to "latin",
             "I'm at 강남 station" to "latin",
+            "Starbucks 가요" to "ko",
+            "Samsung Galaxy 샀어" to "ko",
+            "去Starbucks吧" to "han",
+            "Starbucksです" to "ja",
             "Xin chào, tôi là Minh" to "latin",
         ).forEach { (text, script) -> assertEquals(text, script, Scripts.detect(text)) }
         assertNull(Scripts.detect("123"))
@@ -183,7 +187,7 @@ class TranslationRegressionTest {
 
     @Test fun unansweredSpeechIsHandedOverOnceAndOnlyAfterWaiting() {
         val c = Capture()
-        c.feed(8, true, 1); c.feed(8, false)
+        c.feed(12, true, 1); c.feed(8, false)
         assertNull(c.buffer.pollUnanswered(c.now + 1000, 3500))
         assertNotNull(c.buffer.pollUnanswered(c.now + 4000, 3500))
         assertNull(c.buffer.pollUnanswered(c.now + 9000, 3500))
@@ -192,6 +196,13 @@ class TranslationRegressionTest {
         c.feed(5, true, 2); c.feed(8, false)
         c.begin()
         assertNotNull(c.buffer.finishTurn())
+    }
+
+    @Test fun speechStillGoingIsNotHandedOver() {
+        val c = Capture()
+        c.feed(12, true, 1); c.feed(8, false) // 첫 마디 뒤 잠깐 쉼
+        c.feed(40, true, 2)                   // 이어서 계속 말하는 중
+        assertNull(c.buffer.pollUnanswered(c.now, 3500))
     }
 
     @Test fun answeredSpeechIsNotHandedOver() {

@@ -83,7 +83,8 @@ internal class LiveSpeechBuffer {
      * 꺼낸 발화는 대기열에서 빠지므로 다음 말의 검산을 방해하지 않음. 너무 짧거나 잘린 소리는 버림(null).
      */
     @Synchronized fun pollUnanswered(now: Long, waitMs: Long): ByteArray? {
-        if (turnOpen) return null
+        // 아직 말하는 중이면(잠깐 쉬었다 이어 말하는 경우) 꺼내지 않음. 앞부분만 따로 통역하면 같은 말이 두 번 나옴
+        if (turnOpen || active != null) return null
         val clip = waiting.firstOrNull() ?: return null
         if (now - clip.endedAt < waitMs) return null
         waiting.removeFirst()
@@ -134,7 +135,7 @@ internal class LiveSpeechBuffer {
         private const val END_SILENCE_BYTES = 32000 * 8 / 10
         private const val MIN_SPEECH_BYTES = 32000 / 10
         private const val NOISE_BYTES = 32000 * 3 / 10
-        private const val RESCUE_SPEECH_BYTES = 32000 * 6 / 10
+        private const val RESCUE_SPEECH_BYTES = 32000 // 말소리 1초 이상일 때만 (주변 소음으로 요청이 늘지 않게)
         private const val MAX_BYTES = 32000 * 30
         private const val MAX_AGE_MS = 30_000L
     }
