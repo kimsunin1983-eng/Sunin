@@ -104,18 +104,22 @@ class UtteranceTranslator(
     }
 
     /** 이미 잘라 둔 한 문장 분량의 소리를 바로 통역 (실시간 모델이 놓친 말을 되살릴 때 씀) */
-    fun submitClip(pcm: ByteArray) {
-        if (!closed) submit(pcm)
+    fun submitClip(pcm: ByteArray, tag: Long = 0L) {
+        if (!closed) submit(pcm, tag)
     }
 
+    /** 지금 통역 중인 소리의 꼬리표 (submitClip 에 준 값). onResult 안에서 읽으면 그 결과의 꼬리표 */
+    @Volatile var currentTag = 0L
+        private set
+
     // 통역을 기다리는 문장들. 서버가 느릴 때 끝없이 밀리지 않도록 최대 3개까지만 둠
-    private val queue = ArrayDeque<ByteArray>()
+    private val queue = ArrayDeque<Pair<ByteArray, Long>>()
     private val pumping = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    private fun submit(pcm: ByteArray) {
+    private fun submit(pcm: ByteArray, tag: Long = 0L) {
         var dropped = false
         val waiting = synchronized(queue) {
-            queue.addLast(pcm)
+            queue.addLast(pcm to tag)
             while (queue.size > MAX_WAITING) {
                 queue.removeFirst()
                 dropped = true
@@ -133,7 +137,8 @@ class UtteranceTranslator(
     private fun pump() {
         try {
             while (!closed) {
-                val pcm = synchronized(queue) { if (queue.isEmpty()) null else queue.removeFirst() } ?: return
+                val (pcm, tag) = synchronized(queue) { if (queue.isEmpty()) null else queue.removeFirst() } ?: return
+                currentTag = tag
                 try {
                     interpret(pcm)
                 } catch (e: InterruptedException) {

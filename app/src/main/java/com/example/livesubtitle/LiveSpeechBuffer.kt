@@ -91,8 +91,18 @@ internal class LiveSpeechBuffer {
         return if (clip.usable && clip.speechBytes >= RESCUE_SPEECH_BYTES) clip.pcm.toByteArray() else null
     }
 
-    @Synchronized fun beginTurn(now: Long) {
-        if (turnOpen) return
+    /** 직전에 끝난 번역에 대응하는 말소리 길이(ms). 대응하는 소리가 없었으면 0 */
+    @Volatile var lastSpeechMs = 0
+        private set
+
+    /** 오래된 짧은 소리(잡음)를 치움. 남아 있으면 다음 말이 '발화 둘'로 보여 검산·되살리기가 건너뛰어짐 */
+    @Synchronized fun pruneStale(now: Long, olderThanMs: Long) {
+        waiting.removeAll { now - it.endedAt >= olderThanMs && (!it.usable || it.speechBytes < RESCUE_SPEECH_BYTES) }
+    }
+
+    /** @return 이 번역에 대응할 만한 말소리가 하나라도 있었는지 (없으면 이미 다른 곳으로 넘긴 말에 대한 늦은 번역일 수 있음) */
+    @Synchronized fun beginTurn(now: Long): Boolean {
+        if (turnOpen) return true
         turnOpen = true
         val candidates = waiting.toList() + listOfNotNull(active?.takeUnless { it.claimed })
         selected = candidates.singleOrNull()?.takeIf { now - it.startedAt <= MAX_AGE_MS }
@@ -100,6 +110,7 @@ internal class LiveSpeechBuffer {
         selected?.duringTurn = false // 이 번역의 주인으로 정해진 소리는 겹친 말로 세지 않음
         candidates.forEach { it.claimed = true }
         waiting.clear()
+        return candidates.isNotEmpty()
     }
 
     /** Only call for server turnComplete. Disconnects and interruptions cancel instead. */
@@ -107,6 +118,7 @@ internal class LiveSpeechBuffer {
         val clip = selected
         val result = if (!ambiguous && clip != null && clip.complete && clip.usable &&
             clip.speechBytes >= MIN_SPEECH_BYTES) clip.pcm.toByteArray() else null
+        lastSpeechMs = if (result != null && clip != null) clip.speechBytes / 32 else 0
         // Any overlapping input has uncertain ownership: do not reuse it for a later response.
         if (ambiguous) {
             waiting.clear()

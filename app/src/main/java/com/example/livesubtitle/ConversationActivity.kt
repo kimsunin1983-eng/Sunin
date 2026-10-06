@@ -738,11 +738,10 @@ class ConversationActivity : AppCompatActivity() {
     private var turnOpenedAt = 0L
     private var netWaiting = false
     private var lastInputAt = 0L
-    /** 통역 대신 대답한 것으로 의심되는 번역 (말이 끝날 때 확정) */
-    private var answerSuspect = false
+    /** 이미 문장 단위 방식에 넘긴 말에 대해 실시간 번역이 뒤늦게 시작된 시각 */
+    private var orphanTurnAt = 0L
     /** 놓친 말을 문장 단위 방식에 넘긴 시각과, 마지막으로 넘긴 것이 그 경우였는지 */
     private var unansweredSentAt = 0L
-    private var lastRescueWasUnanswered = false
 
     private fun clearHeard() {
         liveIn.setLength(0)
@@ -814,11 +813,11 @@ class ConversationActivity : AppCompatActivity() {
                 if (live?.isReady == true && rescue != null && quietFor >= 3000 && now - unansweredSentAt >= 4000) {
                     speechBuffer.pollUnanswered(now, 3500)?.let {
                         unansweredSentAt = now
-                        lastRescueWasUnanswered = true
                         clearHeard()
-                        rescue?.submitClip(it)
+                        rescue?.submitClip(it, tag = now) // 꼬리표 = 넘긴 시각
                     }
                 }
+                if (live?.isReady == true) speechBuffer.pruneStale(now, 3500)
             }
             main.postDelayed(this, 1000)
         }
@@ -859,24 +858,9 @@ class ConversationActivity : AppCompatActivity() {
                     override fun onSpeaking(speaking: Boolean) {}
                     override fun onPending(count: Int) {}
                     override fun onError(message: String, fatal: Boolean) {}
-                    override fun onResult(speakerIsA: Boolean, src: String, out: String) = ui {
-                        if (!running || !fastMode || mine != session) return@ui
-                        if (lastRescueWasUnanswered) {
-                            // 놓친 말이라 여겨 넘겼는데 그사이 실시간 번역이 나왔거나(같은 말이 두 번 들림),
-                            // 결과가 너무 늦게 왔으면 버림
-                            val late = SystemClock.elapsedRealtime() - unansweredSentAt > 10_000
-                            if (turnOpenedAt > unansweredSentAt || late) return@ui
-                        }
-                        val speaker = if (speakerIsA) left else right
-                        addBubble(speaker, src, out)
-                        if (speakerMode) {
-                            if (!speaker.isLeft) {
-                                setFacing(out) // 내가 한 말 → 상대가 읽게
-                                facingSeq = -1
-                            } else speak(out, right) // 상대가 한 말 → 내 이어폰
-                        } else {
-                            speak(out, other(speaker))
-                        }
+                    override fun onResult(speakerIsA: Boolean, src: String, out: String) {
+                        val sentAt = rescue?.currentTag ?: 0L // 이 결과가 어느 소리의 것인지 (화면 쪽으로 넘기기 전에 읽어 둠)
+                        ui { showRescued(mine, sentAt, speakerIsA, src, out) }
                     }
                 },
                 extraContext = contextPrompt(),
@@ -901,6 +885,27 @@ class ConversationActivity : AppCompatActivity() {
         }
         resetLiveTurn()
         connectLive()
+    }
+
+    /** 문장 단위 방식으로 되살린 번역을 보여 주고 들려줌. sentAt: 놓친 말로 넘긴 시각 (표시 문구·대답 때문에 넘긴 것이면 0) */
+    private fun showRescued(mine: Int, sentAt: Long, speakerIsA: Boolean, src: String, out: String) {
+        if (!running || !fastMode || mine != session) return
+        if (sentAt != 0L) {
+            // 놓친 말이라 여겨 넘긴 것: 그사이 실시간 모델이 그 말을 뒤늦게 번역했거나(같은 말이 두 번 들림),
+            // 결과가 너무 늦게 왔으면 버림
+            val late = SystemClock.elapsedRealtime() - sentAt > 10_000
+            if (orphanTurnAt > sentAt || late) return
+        }
+        val speaker = if (speakerIsA) left else right
+        addBubble(speaker, src, out)
+        if (speakerMode) {
+            if (!speaker.isLeft) {
+                setFacing(out) // 내가 한 말 → 상대가 읽게
+                facingSeq = -1
+            } else speak(out, right) // 상대가 한 말 → 내 이어폰
+        } else {
+            speak(out, other(speaker))
+        }
     }
 
     private fun interpreterPrompt(): String = basePrompt() + "\n\n" + contextPrompt()
@@ -1056,6 +1061,7 @@ class ConversationActivity : AppCompatActivity() {
                     liveReady = false
                     endLiveTurn(confirmed = false)
                     if (gotOutput || error == null || error == "goAway") {
+                        netWaiting = false
                         main.postDelayed({ connectLive() }, 300) // 세션 시간 제한 등 → 다시 연결
                     } else if (!error.orEmpty().startsWith("(") && !error.orEmpty().startsWith("HTTP ") &&
                         NETWORK_ERROR.containsMatchIn(error.orEmpty())
@@ -1101,14 +1107,17 @@ class ConversationActivity : AppCompatActivity() {
         if (!liveTurnOpen) {
             liveTurnOpen = true
             turnOpenedAt = now
-            speechBuffer.beginTurn(now)
+            // 5초 넘게 묵은 받아쓰기는 이번 말의 것이 아님
+            if (now - lastInputAt > 5000) clearHeard()
+            if (!speechBuffer.beginTurn(now)) orphanTurnAt = now
             main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
         main.removeCallbacks(turnIdle)
         // 소리는 재생보다 빨리 도착하고, 서버의 종료 신호는 재생이 끝날 즈음에 올 수 있음
         // → 받은 소리가 다 재생될 시각 + 2초까지는 기다림 (최소 4초)
-        val playbackLeft = turnOpenedAt + turnAudioMs - now
+        // (아직 귀를 못 정해 소리를 붙잡고 있는 중이면 재생 중이 아니므로 4초)
+        val playbackLeft = if (ear == null) 0L else turnOpenedAt + turnAudioMs - now
         main.postDelayed(turnIdle, maxOf(4000L, playbackLeft + 2000L).coerceAtMost(25_000L))
     }
 
@@ -1125,84 +1134,37 @@ class ConversationActivity : AppCompatActivity() {
         val suspicious = isPlaceholder(text) || mightBecomePlaceholder(text)
         if (suspicious && !allowSuspicious) return
 
-        val script = detectScript(text)
-        val letters = text.count { it.isLetter() }
-        val inText = liveIn.toString()
-        val inScript = detectScript(inText)
-
-        // 통역 대신 같은 언어로 대답하거나 따라 말한 경우: 들은 말과 나온 말이 같은 글자(한글·가나·키릴·태국)
-        // → 소리를 내보내지 않고, 말이 끝나면 문장 단위 방식으로 다시 통역
-        if (left.script != right.script && script != null && script == inScript &&
-            script in setOf("ko", "ja", "cyr", "thai") &&
-            letters >= 4 && inText.count { it.isLetter() } >= 4 && rescue != null &&
-            // 들은 말에 알파벳이 섞여 있으면(앞 사람 말이 섞였을 수 있음) 단정하지 않음
-            inText.count { it in 'a'..'z' || it in 'A'..'Z' } < 4
-        ) {
-            // 바로 버리지 않고 붙잡아 둠. 말이 끝났을 때 다시 통역할 소리가 있으면 버리고, 없으면 그대로 들려줌
-            answerSuspect = true
-            if (!final) return
-        } else {
-            answerSuspect = false
-        }
-
-        // 소리만 먼저 오고 글자가 아직 하나도 없으면 양쪽 귀에 틀지 말고 조금 더 기다림 (최대 3초)
-        if (letters == 0 && force && !final && earWaits < 3) {
-            earWaits++
-            main.removeCallbacks(earTimeout)
-            main.postDelayed(earTimeout, 600)
-            return
-        }
-        // 한글·일본어 번역이 "Starbucks" 같은 알파벳 단어로 시작할 수 있음.
-        // 알파벳만 보일 때는 15자 넘게 이어지거나 기다림이 끝난 뒤에야 알파벳 언어로 판단
-        val pair = setOf(left.script, right.script)
-        if (script == "latin" && !force && pair.size == 2 && "latin" in pair && letters < 15) {
-            // 바로 정해도 되는 경우: 들은 말이 상대 글자(한글 등)였거나, 알파벳 문장이 이미 끝맺음 부호로 끝남
-            val heardOtherScript = inScript != null && inScript != "latin" && inScript in pair
-            val sentenceDone = letters >= 2 && text.trimEnd().lastOrNull() in setOf('.', '?', '!')
-            if (!heardOtherScript && !sentenceDone) return
-        }
-        // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
-        // 다만 "네", "Yes" 처럼 짧게 끝난 말은 마지막 판단(force) 때 있는 글자로 정함
-        val shortButDone = script == "latin" && letters >= 2 &&
-            text.trimEnd().lastOrNull() in setOf('.', '?', '!') &&
-            inScript != null && inScript != "latin" && inScript in pair
-        val enough = force || letters >= 4 || shortButDone
+        fun earOf(side: Side) = if (side.isLeft) EarPolicy.Decision.LEFT else EarPolicy.Decision.RIGHT
         // 서버가 언어를 알려 줬으면, 글자로 구분할 수 없을 때 그것으로 귀를 정함
-        val byLanguage: Ear? = sideOfLanguage(turnOutLang)?.let { if (it.isLeft) Ear.LEFT else Ear.RIGHT }
-            ?: sideOfLanguage(turnInLang)?.let { if (it.isLeft) Ear.RIGHT else Ear.LEFT }
-        val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
-        val scripts = setOf(left.script, right.script)
-        val chosen = when {
-            autoSide != null -> {
-                // 정해진 언어 글자로 나온 번역은 그 사람 귀에, 그 밖의 글자는 자동 감지 쪽 귀에
-                val known = other(autoSide)
-                when {
-                    known.script == "latin" -> Ear.BOTH // 알파벳 언어는 다른 알파벳 언어와 글자로 구분 불가
-                    // 다루지 않는 글자(아랍어·힌디어 등)는 정해진 언어가 아니므로 자동 감지 쪽 귀에
-                    script == null && letters >= 4 -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
-                    script == null -> if (force) Ear.BOTH else return
-                    !enough -> return
-                    matches(script, known) -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
-                    else -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
-                }
+        val languageEar = sideOfLanguage(turnOutLang)?.let { earOf(it) }
+            ?: sideOfLanguage(turnInLang)?.let { earOf(other(it)) }
+        val decision = EarPolicy.decide(
+            leftScript = left.script,
+            rightScript = right.script,
+            leftAuto = left.lang.code == AUTO,
+            rightAuto = right.lang.code == AUTO,
+            out = text,
+            heard = liveIn.toString(),
+            force = force,
+            final = final,
+            canRescue = rescue != null,
+            mayWaitForText = earWaits < 3,
+            languageEar = languageEar,
+        )
+        val decided = when (decision) {
+            EarPolicy.Decision.WAIT, EarPolicy.Decision.SUSPECT -> return
+            EarPolicy.Decision.WAIT_NO_TEXT -> {
+                // 소리만 먼저 오고 글자가 아직 없음 → 양쪽 귀에 틀지 말고 조금 더 기다림 (최대 3초)
+                earWaits++
+                main.removeCallbacks(earTimeout)
+                main.postDelayed(earTimeout, 600)
+                return
             }
-            left.script == right.script -> Ear.BOTH // 글자로 구분 못 하는 언어쌍은 양쪽에
-            script == null -> if (force) Ear.BOTH else return
-            !enough -> return
-            // 일본어↔중국어: 한자만으로는 어느 쪽인지 알 수 없음 → 가나가 나올 때까지 기다리고, 끝내 없으면 양쪽
-            scripts == setOf("ja", "han") && script == "han" -> when {
-                !force -> return
-                // 가나가 하나도 없는 긴 문장은 중국어로 봄. 짧은 한자어("了解")는 양쪽에
-                text.count { it in '一'..'鿿' } >= 6 -> if (left.script == "han") Ear.LEFT else Ear.RIGHT
-                else -> Ear.BOTH
-            }
-            matches(script, left) -> Ear.LEFT
-            matches(script, right) -> Ear.RIGHT
-            force -> Ear.BOTH
-            else -> return
+            EarPolicy.Decision.LEFT -> Ear.LEFT
+            EarPolicy.Decision.RIGHT -> Ear.RIGHT
+            EarPolicy.Decision.BOTH -> Ear.BOTH
         }
         main.removeCallbacks(earTimeout)
-        val decided = if (chosen == Ear.BOTH && byLanguage != null) byLanguage else chosen
         ear = decided
         heldAudio.forEach { play(it, decided) }
         heldAudio.clear()
@@ -1295,10 +1257,7 @@ class ConversationActivity : AppCompatActivity() {
         main.removeCallbacks(earTimeout)
         ear = Ear.NONE
 
-        if (pcm != null && pcm.size >= 32 * 100) {
-            lastRescueWasUnanswered = false
-            rescue?.submitClip(pcm)
-        }
+        if (pcm != null && pcm.size >= 32 * 100) rescue?.submitClip(pcm)
 
     }
 
@@ -1321,7 +1280,7 @@ class ConversationActivity : AppCompatActivity() {
      * 완결된 음성이 한 발화와 대응할 때만 독립적으로 받아쓰기·번역 후 비교.
      * 결과가 늦게 도착해도 해당 기록만 수정하고 현재 화면의 발화 번호를 확인함.
      */
-    private fun refineOriginal(context: String, turn: Turn?, pcm: ByteArray?) {
+    private fun refineOriginal(context: String, turn: Turn?, pcm: ByteArray?, speechMs: Int) {
         val views = liveBubble ?: return
         val e = ear ?: return
         if (e == Ear.BOTH || e == Ear.NONE) return
@@ -1332,7 +1291,7 @@ class ConversationActivity : AppCompatActivity() {
         if (pcm == null) return
         // 아주 짧은 말은 검산하지 않고, 요청 사이에 3초 간격을 둠 (무료 사용량 한도 보호)
         val nowMs = SystemClock.elapsedRealtime()
-        if (pcm.size < 32000 || nowMs - lastCheckAt < 3000) return // 1초 미만의 말은 건너뜀
+        if (speechMs < 1000 || nowMs - lastCheckAt < 3000) return // 말소리 1초 미만은 건너뜀
         lastCheckAt = nowMs
         val worker = transcriber ?: return
         val target = views.first
@@ -1378,7 +1337,10 @@ class ConversationActivity : AppCompatActivity() {
             null
         }
         val placeholder = LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)
-        if (ear == null && answerSuspect && pcm != null && pcm.size >= 32 * 300) {
+        val speechMs = speechBuffer.lastSpeechMs
+        val answered = ear == null && rescue != null &&
+            EarPolicy.answered(left.script, right.script, liveOut.toString(), liveIn.toString())
+        if (answered && pcm != null && pcm.size >= 32 * 300) {
             heldAudio.clear()
             heldAudioBytes = 0
             ear = Ear.NONE // 아래에서 버리고 문장 단위 방식으로 다시 통역
@@ -1391,8 +1353,9 @@ class ConversationActivity : AppCompatActivity() {
         if (placeholder || ear == Ear.NONE) dropTurn(pcm)
         if (liveOut.isNotEmpty()) {
             val before = contextPrompt() // 검산에는 이번 말이 들어가기 전의 맥락만 줌
-            val turn = rememberTurn()
-            if (confirmed) refineOriginal(before, turn, pcm)
+            // 대답으로 의심되는데 다시 통역할 소리가 없어 그대로 들려준 경우: 번역이 아니므로 대화 흐름에 남기지 않음
+            val turn = if (answered) null else rememberTurn()
+            if (confirmed && !answered) refineOriginal(before, turn, pcm, speechMs)
         }
         if (ear != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             // 구형 기기는 버퍼가 차야 재생되므로 무음으로 밀어 줌
@@ -1421,7 +1384,7 @@ class ConversationActivity : AppCompatActivity() {
         turnInLang = null
         turnOutLang = null
         turnAudioMs = 0L
-        answerSuspect = false
+
         turnSeq++
         lastLiveOutputAt = 0L
     }

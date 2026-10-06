@@ -205,9 +205,20 @@ class TranslationRegressionTest {
         assertNull(c.buffer.pollUnanswered(c.now, 3500))
     }
 
+    @Test fun shortNoiseIsPrunedSoItDoesNotBlockTheNextCheck() {
+        val c = Capture()
+        c.feed(4, true); c.feed(8, false) // 0.4초짜리 소리 (기침 등)
+        c.now += 4000
+        c.buffer.pruneStale(c.now, 3500)
+        c.feed(12, true, 1); c.feed(8, false)
+        c.begin()
+        assertNotNull(c.buffer.finishTurn())
+        assertEquals(1200, c.buffer.lastSpeechMs)
+    }
+
     @Test fun answeredSpeechIsNotHandedOver() {
         val c = Capture()
-        c.feed(8, true, 1); c.feed(8, false)
+        c.feed(12, true, 1); c.feed(8, false)
         c.begin()
         assertNull(c.buffer.pollUnanswered(c.now + 9000, 3500))
     }
