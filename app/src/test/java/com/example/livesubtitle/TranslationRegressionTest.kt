@@ -20,6 +20,19 @@ class TranslationRegressionTest {
         assertFalse(LiveOutputPolicy.shouldDrop("No audio equipment is needed.", true))
     }
 
+    @Test fun placeholderArrivingInPiecesIsHeldButNeverDroppedByPrefixAlone() {
+        listOf("Background", "(inaud", "No sp", "Mus", "No").forEach {
+            assertTrue(it, LiveOutputPolicy.couldGrowIntoPlaceholder(it))
+        }
+        listOf("Background noise", "No, thank you", "Musical", "Hello", "", "안녕하세요").forEach {
+            assertFalse(it, LiveOutputPolicy.couldGrowIntoPlaceholder(it))
+        }
+        // 앞부분만 같은 정상 대답은 말이 끝났을 때 버리지 않음
+        assertFalse(LiveOutputPolicy.shouldDrop("No", true))
+        assertFalse(LiveOutputPolicy.shouldDrop("Background", true))
+        assertTrue(LiveOutputPolicy.shouldDrop("Background noise.", true))
+    }
+
     @Test fun commandsAndShortSentencesAreNotNames() {
         listOf("I am sick", "I love you", "STOP", "NO", "Help me", "Do it", "Yes", "Go", "STOP!").forEach {
             assertFalse(it, TranslationChecks.permitsUnchanged(it))
