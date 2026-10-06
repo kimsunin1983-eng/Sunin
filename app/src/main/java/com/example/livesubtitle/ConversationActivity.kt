@@ -700,22 +700,23 @@ class ConversationActivity : AppCompatActivity() {
     }
 
     /** 듣는 사람 쪽 이어폰에만 읽어 줌 */
-    private fun speak(text: String, listener: Side) {
-        val engine = tts ?: return
-        if (!ttsReady) return
+    /** @return 실제로 소리 내어 읽기 시작했는지 (음성이 없거나 준비가 안 됐으면 false) */
+    private fun speak(text: String, listener: Side): Boolean {
+        val engine = tts ?: return false
+        if (!ttsReady) return false
         val locale = Locale.forLanguageTag(listener.lang.code)
         if (engine.isLanguageAvailable(locale) < TextToSpeech.LANG_AVAILABLE) {
             if (!warnedTts) {
                 warnedTts = true
                 toast("이 폰에 ${listener.lang.name} 음성이 없어요. 폰 설정의 '글자 읽어주기(TTS)'에서 음성 데이터를 설치해 주세요.")
             }
-            return
+            return false
         }
         engine.language = locale
         val params = Bundle().apply {
             putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, if (listener.isLeft) -1f else 1f)
         }
-        engine.speak(text, TextToSpeech.QUEUE_ADD, params, "talk-${ttsSeq++}")
+        return engine.speak(text, TextToSpeech.QUEUE_ADD, params, "talk-${ttsSeq++}") == TextToSpeech.SUCCESS
     }
 
     // ═════════════════════════ 빠름 방식 (실시간 모델 하나) ═════════════════════════
@@ -912,6 +913,15 @@ class ConversationActivity : AppCompatActivity() {
         }
         transcriber = Transcriber(apiKey)
         fixExecutor = CheckExecutor.create() // running 1 + waiting 2, owned by this session
+        // 지난 통역의 기록이 이번 통역의 판단에 섞이지 않게
+        unansweredSentAt = 0L
+        rescuedSentAt = 0L
+        rescuedAt = 0L
+        rescuedEar = null
+        orphanTurnAt = 0L
+        orphanTurnEar = null
+        lastVoiceAt = 0L
+        lastInputAt = 0L
         speechBuffer = LiveSpeechBuffer()
         speakerBusyUntil = 0L
         trackBusyUntil = 0L
@@ -947,19 +957,23 @@ class ConversationActivity : AppCompatActivity() {
             val target = if (speakerIsA) Ear.RIGHT else Ear.LEFT
             val sameUtterance = orphanTurnAt > sentAt && (orphanTurnEar == target || orphanTurnEar == Ear.BOTH)
             if (sameUtterance || late) return
-            rescuedSentAt = sentAt
-            rescuedAt = SystemClock.elapsedRealtime()
-            rescuedEar = target
         }
         val speaker = if (speakerIsA) left else right
         addBubble(speaker, src, out)
-        if (speakerMode) {
+        val spoken = if (speakerMode) {
             if (!speaker.isLeft) {
-                setFacing(out) // 내가 한 말 → 상대가 읽게
+                setFacing(out) // 내가 한 말 → 상대가 읽게 (소리는 나지 않음)
                 facingSeq = -1
+                false
             } else speak(out, right) // 상대가 한 말 → 내 이어폰
         } else {
             speak(out, other(speaker))
+        }
+        // 실제로 소리로 들려준 경우에만 기록. 글자만 보여 줬다면 뒤늦게 오는 실시간 번역의 소리는 버리지 않고 들려줌
+        if (sentAt != 0L && spoken) {
+            rescuedSentAt = sentAt
+            rescuedAt = SystemClock.elapsedRealtime()
+            rescuedEar = if (speakerIsA) Ear.RIGHT else Ear.LEFT
         }
     }
 
