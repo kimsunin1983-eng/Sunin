@@ -95,6 +95,17 @@ internal class LiveSpeechBuffer {
     @Volatile var lastSpeechMs = 0
         private set
 
+    /**
+     * 연결이 끊기거나 새로 맺을 때: 이미 보냈지만 아직 번역이 시작되지 않은 말들을 꺼냄.
+     * 새 연결은 그 소리를 듣지 못했으므로, 꺼내서 문장 단위 방식으로 통역하지 않으면 그대로 사라짐.
+     */
+    @Synchronized fun takePending(): List<ByteArray> {
+        val out = waiting.filter { it.usable && !it.claimed && it.speechBytes >= RESCUE_SPEECH_BYTES }
+            .map { it.pcm.toByteArray() }
+        waiting.clear()
+        return out
+    }
+
     /** 오래된 짧은 소리(잡음)를 치움. 남아 있으면 다음 말이 '발화 둘'로 보여 검산·되살리기가 건너뛰어짐 */
     @Synchronized fun pruneStale(now: Long, olderThanMs: Long) {
         waiting.removeAll { now - it.endedAt >= olderThanMs && (!it.usable || it.speechBytes < RESCUE_SPEECH_BYTES) }

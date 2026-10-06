@@ -449,6 +449,7 @@ class ConversationActivity : AppCompatActivity() {
                     utterance?.feed(buf, n, lv)
                     val client = live
                     val speech = lv >= maxOf(gateLevel, 0.03f)
+                    if (speech) lastVoiceAt = SystemClock.elapsedRealtime()
                     if (fastMode && client?.isReady == true) {
                         // 다시 연결하는 사이(0.5~1초)에 들어온 소리를 먼저 보냄 → 말의 첫머리가 잘리지 않게
                         while (true) {
@@ -753,6 +754,8 @@ class ConversationActivity : AppCompatActivity() {
     /** 이미 문장 단위 방식에 넘긴 말에 대해 실시간 번역이 뒤늦게 시작된 시각 */
     private var orphanTurnAt = 0L
     private var turnIsOrphan = false
+    /** 마이크에 말소리(작은 소리 포함)가 마지막으로 잡힌 시각 */
+    @Volatile private var lastVoiceAt = 0L
     /** 그 늦은 번역을 들려준 귀 */
     private var orphanTurnEar: Ear? = null
     /** 되살린 번역을 마지막으로 들려준 기록: 넘긴 시각, 들려준 시각, 들려준 귀 */
@@ -827,7 +830,7 @@ class ConversationActivity : AppCompatActivity() {
                 }
                 // 서버가 연결을 10분쯤에 끊으므로(말하는 도중일 수도 있음), 8분 반이 넘으면 조용한 틈에 미리 새로 맺음.
                 // 앞 대화는 recentTurns 로 새 연결에 넘겨주므로 맥락이 이어짐
-                else if (now - liveConnectedAt > 510_000 && quietFor > 3000 && idleOutput) {
+                else if (now - liveConnectedAt > 510_000 && quietFor > 3000 && idleOutput && !liveTurnOpen) {
                     renewLive(null)
                 }
                 // 말이 끝난 지 3.5초가 지나도록 번역이 시작되지 않은 말 → 문장 단위 방식으로 대신 통역
@@ -844,6 +847,16 @@ class ConversationActivity : AppCompatActivity() {
         }
     }
 
+    /** 연결이 바뀌기 직전: 보냈지만 아직 번역되지 않은 말은 새 연결이 모르므로 문장 단위 방식으로 통역 */
+    private fun handOverPending() {
+        val r = rescue ?: return
+        val now = SystemClock.elapsedRealtime()
+        speechBuffer.takePending().forEach {
+            unansweredSentAt = now
+            r.submitClip(it, tag = now)
+        }
+    }
+
     private fun renewLive(message: String?) {
         misses = 0
         unansweredSpeechMs = 0
@@ -851,6 +864,7 @@ class ConversationActivity : AppCompatActivity() {
         live = null
         liveReady = false
         runCatching { old?.close() }
+        if (!liveTurnOpen) handOverPending()
         speechBuffer.cancelTurn()
         resetLiveTurn()
         if (message != null) status.text = message
@@ -881,6 +895,10 @@ class ConversationActivity : AppCompatActivity() {
                     override fun onError(message: String, fatal: Boolean) = ui {
                         // 다시 통역하지 못했으면 알려서 한 번 더 말하게 함
                         if (!running || mine != session) return@ui
+                        if (fatal) {
+                            runCatching { rescue?.close() }
+                            rescue = null // 이후로는 의심스러운 번역도 버리지 않고 그대로 들려줌
+                        }
                         status.text = message
                         main.postDelayed({ if (running && mine == session) updateStatus() }, 4000)
                     }
@@ -1096,6 +1114,7 @@ class ConversationActivity : AppCompatActivity() {
                     if (!running || live !== client) return@ui
                     live = null
                     liveReady = false
+                    if (!liveTurnOpen) handOverPending()
                     endLiveTurn(confirmed = false)
                     if (gotOutput || error == null || error == "goAway") {
                         netWaiting = false
@@ -1150,7 +1169,9 @@ class ConversationActivity : AppCompatActivity() {
                 turnInLang = null
             }
             // 새로 한 말이 없는데 번역이 시작됨 = 이미 문장 단위 방식에 넘긴 말을 뒤늦게 번역하는 것일 수 있음
-            turnIsOrphan = !speechBuffer.beginTurn(now, unansweredSentAt)
+            // 넘긴 뒤 마이크에 말소리가 조금이라도 있었으면(짧은 "네"나 연달아 한 말) 새 말의 번역으로 봄.
+            // 잘못 보면 같은 말이 두 번 들릴 수 있지만, 반대로 잘못 보면 새 말이 통째로 사라지므로 이쪽을 택함
+            turnIsOrphan = !speechBuffer.beginTurn(now, unansweredSentAt) && lastVoiceAt <= unansweredSentAt
             main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
@@ -1174,7 +1195,14 @@ class ConversationActivity : AppCompatActivity() {
         // ("Music" 다음에 " is my life." 가 이어질 수 있으므로). 버릴지는 endLiveTurn 이 정함
         val suspicious = isPlaceholder(text) || mightBecomePlaceholder(text) ||
             (!final && LiveOutputPolicy.couldGrowIntoPlaceholder(text))
-        if (suspicious && !allowSuspicious) return
+        if (suspicious && !allowSuspicious) {
+            // 글자가 더 와서 정상 문장으로 밝혀지면 바로 들려주도록 타이머를 이어 감
+            if (force && !final) {
+                main.removeCallbacks(earTimeout)
+                main.postDelayed(earTimeout, 400)
+            }
+            return
+        }
 
         fun earOf(side: Side) = if (side.isLeft) EarPolicy.Decision.LEFT else EarPolicy.Decision.RIGHT
         // 서버가 언어를 알려 줬으면, 글자로 구분할 수 없을 때 그것으로 귀를 정함
@@ -1210,7 +1238,7 @@ class ConversationActivity : AppCompatActivity() {
         val nowMs = SystemClock.elapsedRealtime()
         // 넘긴 말을 문장 단위 방식이 이미 들려줬는데 실시간 모델이 뒤늦게 같은 말을 번역함 → 두 번 들리지 않게 버림
         if (turnIsOrphan && rescuedSentAt != 0L && rescuedSentAt == unansweredSentAt &&
-            nowMs - rescuedAt < 15_000 && (decided == rescuedEar || decided == Ear.BOTH)
+            nowMs - rescuedAt < 8_000 && (decided == rescuedEar || decided == Ear.BOTH)
         ) {
             heldAudio.clear()
             heldAudioBytes = 0

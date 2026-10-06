@@ -245,6 +245,16 @@ class TranslationRegressionTest {
         assertTrue(c.buffer.beginTurn(c.now, sentAt))
     }
 
+    @Test fun pendingSpeechIsHandedOverWhenTheConnectionChanges() {
+        val c = Capture()
+        c.feed(15, true, 1); c.feed(8, false)   // 번역을 기다리는 온전한 말
+        c.feed(3, true); c.feed(8, false)       // 짧은 소리는 넘기지 않음
+        val pending = c.buffer.takePending()
+        assertEquals(1, pending.size)
+        assertTrue(pending[0].any { it == 1.toByte() })
+        assertTrue(c.buffer.takePending().isEmpty())
+    }
+
     @Test fun answeredSpeechIsNotHandedOver() {
         val c = Capture()
         c.feed(12, true, 1); c.feed(8, false)
