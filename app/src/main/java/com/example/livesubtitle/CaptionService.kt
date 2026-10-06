@@ -495,6 +495,7 @@ class CaptionService : Service() {
                 lastPartialSent = ""
                 partialOriginal = null
                 partialDraft = null
+                gotAnyResult = true // 다시 듣기 시작할 때 안내 문구가 이 줄을 지우지 않게
                 addLine(heardSoFar, carriedDraft)
             }
             when (error) {
@@ -830,7 +831,7 @@ class CaptionService : Service() {
                 liveOut.append(delta)
                 // 문장이 충분히 길고 끝맺음 부호로 끝나면 한 줄로 확정
                 val t = liveOut.trimEnd()
-                if ((t.length > 40 && t.last() in SENTENCE_END) || t.length > 110) {
+                if ((t.length > 24 && t.last() in SENTENCE_END) || t.length > 80) {
                     finalizeLive()
                 } else {
                     renderLive()
@@ -878,7 +879,7 @@ class CaptionService : Service() {
             .apply()
         Toast.makeText(
             this,
-            "Gemini 실시간 통역에 연결하지 못해 '듣기 번역' 방식으로 전환했어요.\n사유: ${error?.take(120)}",
+            "Gemini 실시간 통역에 연결하지 못해 '듣기 번역' 방식으로 전환했어요.\n사유: ${(error ?: "연결되자마자 닫힘").take(120)}",
             Toast.LENGTH_LONG
         ).show()
         startListen()

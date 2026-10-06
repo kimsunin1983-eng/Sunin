@@ -299,6 +299,11 @@ class ConversationActivity : AppCompatActivity() {
         session++
         playGen++
         recentTurns.clear()
+        netWaiting = false
+        steadyErrorUntil = 0L
+        if (fastMode && left.lang.code != AUTO && right.lang.code != AUTO && left.script == right.script) {
+            toast("두 언어가 같은 글자를 써서 누가 말했는지 가려내기 어려워요. 번역이 양쪽 귀에 모두 들릴 수 있어요.")
+        }
         speakerRouteChecked = false
         running = true
         setFacing("")
@@ -425,7 +430,16 @@ class ConversationActivity : AppCompatActivity() {
                     }
                     wave.push(lv)
                     // 폰 스피커로 번역이 나오는 동안에는 그 소리를 다시 듣지 않도록 쉼
-                    if (speakerPlaying()) continue
+                    if (speakerPlaying()) {
+                        // 아예 안 보내면 서버가 말이 끝났는지 알 수 없음 → 무음을 보냄
+                        val c = live
+                        if (fastMode && c?.isReady == true) {
+                            java.util.Arrays.fill(buf, 0, n, 0.toByte())
+                            speechBuffer.feed(buf, n, false, SystemClock.elapsedRealtime())
+                            c.sendAudio(buf, n)
+                        }
+                        continue
+                    }
                     if (lv > 0.1f) {
                         lastSpeechAt = SystemClock.elapsedRealtime()
                         unansweredSpeechMs += 100
@@ -522,7 +536,7 @@ class ConversationActivity : AppCompatActivity() {
     private var notes = ""
 
     /** 목소리 설정이 바뀌면 통하는 조합도 달라질 수 있어 따로 기억 */
-    private fun variantKey() = if (wantAffective) "talkLiveVariant3a" else "talkLiveVariant3"
+    private fun variantKey() = if (wantAffective) "talkLiveVariant4a" else "talkLiveVariant4"
 
     private fun loadTalkSettings() {
         speakerMode = prefs.getBoolean("talkSpeaker", false)
@@ -649,15 +663,21 @@ class ConversationActivity : AppCompatActivity() {
 
                 override fun onError(message: String, fatal: Boolean) = ui {
                     if (!running || mine != session) return@ui
-                    if (fatal) stop(message) else status.text = message
+                    if (fatal) stop(message) else {
+                        status.text = message
+                        steadyErrorUntil = SystemClock.elapsedRealtime() + 4000
+                    }
                 }
             },
             extraContext = contextPrompt(), // 상황·말투·이름 설정을 문장 단위 방식에도 반영
         )
     }
 
+    private var steadyErrorUntil = 0L
+
     private fun refreshSteadyStatus() {
         if (!running || fastMode) return
+        if (SystemClock.elapsedRealtime() < steadyErrorUntil) return // 오류 안내는 4초 동안 유지
         status.text = when {
             hearing -> "말을 듣고 있어요…"
             waiting > 0 -> "번역하고 있어요…"
@@ -709,22 +729,31 @@ class ConversationActivity : AppCompatActivity() {
     private val turnIdle = Runnable { if (liveTurnOpen) endLiveTurn(confirmed = false) }
     private var heldAudioBytes = 0
     private var earWaits = 0
+    /** 서버가 알려 준 이번 말의 언어 / 번역문의 언어 (없을 수 있음) */
+    private var turnInLang: String? = null
+    private var turnOutLang: String? = null
+    /** 이번 번역에서 지금까지 받은 소리 길이와 받기 시작한 시각 */
+    private var turnAudioMs = 0L
+    private var turnOpenedAt = 0L
+    private var netWaiting = false
+    private var lastCheckAt = 0L
 
     /** NONE: 번역이 아닌 출력이라 버림 */
     private enum class Ear { LEFT, RIGHT, BOTH, NONE }
 
     /** 시도할 연결 설정 조합. 서버가 거절하면 다음 것으로, 성공한 것을 기억해 다음에 먼저 씀 */
-    private data class Variant(val model: String, val vad: Boolean, val affective: Boolean)
+    private data class Variant(val model: String, val vad: Boolean, val affective: Boolean, val hints: Boolean = false)
 
+    // hints: 받아쓰기에 두 언어를 알려 줌. 서버가 거절하면 hints 없는 조합으로 넘어감
     private val liveVariants = listOf(
+        Variant("gemini-3.8-live", vad = true, affective = true, hints = true),
+        Variant("gemini-3.8-live", vad = true, affective = false, hints = true),
         Variant("gemini-3.8-live", vad = true, affective = true),
         Variant("gemini-3.8-live", vad = true, affective = false),
         Variant("gemini-3.8-live", vad = false, affective = false),
         Variant("gemini-3.1-flash-live-preview", vad = true, affective = false),
         Variant("gemini-3.1-flash-live-preview", vad = false, affective = false),
-        Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = true),
         Variant("gemini-2.5-flash-native-audio-latest", vad = true, affective = false),
-        Variant("gemini-2.5-flash-native-audio-latest", vad = false, affective = false),
     )
     private var liveVariant = 0
 
@@ -753,10 +782,14 @@ class ConversationActivity : AppCompatActivity() {
                     misses++
                     if (misses >= 2) renewLive("번역이 멈춘 것 같아 다시 연결했어요")
                 }
-                // 서버가 연결을 15분에 끊으므로, 13분이 넘으면 조용한 틈에 미리 새로 맺음.
+                // 서버가 연결을 10분쯤에 끊으므로(말하는 도중일 수도 있음), 8분 반이 넘으면 조용한 틈에 미리 새로 맺음.
                 // 앞 대화는 recentTurns 로 새 연결에 넘겨주므로 맥락이 이어짐
-                else if (now - liveConnectedAt > 13 * 60_000 && quietFor > 3000 && idleOutput) {
+                else if (now - liveConnectedAt > 510_000 && quietFor > 3000 && idleOutput) {
                     renewLive(null)
+                }
+                // 말이 끝난 지 3.5초가 지나도록 번역이 시작되지 않은 말 → 문장 단위 방식으로 대신 통역
+                if (live?.isReady == true) {
+                    speechBuffer.pollUnanswered(now, 3500)?.let { rescue?.submitClip(it) }
                 }
             }
             main.postDelayed(this, 1000)
@@ -917,6 +950,7 @@ class ConversationActivity : AppCompatActivity() {
                 override fun onReady() = ui {
                     if (live === client) {
                         liveReady = true
+                        netWaiting = false
                         liveConnectedAt = SystemClock.elapsedRealtime()
                         prefs.edit().putInt(variantKey(), liveVariant).apply()
                         updateStatus()
@@ -936,8 +970,17 @@ class ConversationActivity : AppCompatActivity() {
                     if (ear == null) chooseEar(force = false) else renderLiveBubble()
                 }
 
+                override fun onInputLanguage(code: String) = ui {
+                    if (live === client) turnInLang = code
+                }
+
+                override fun onOutputLanguage(code: String) = ui {
+                    if (live === client) turnOutLang = code
+                }
+
                 override fun onAudio(pcm: ByteArray) = ui {
                     if (!running || live !== client) return@ui
+                    turnAudioMs += pcm.size / 2 * 1000L / OUT_RATE
                     touchLiveTurn()
                     val e = ear
                     if (e == null) {
@@ -976,6 +1019,10 @@ class ConversationActivity : AppCompatActivity() {
                     endLiveTurn(confirmed = false)
                     if (gotOutput || error == null || error == "goAway") {
                         main.postDelayed({ connectLive() }, 300) // 세션 시간 제한 등 → 다시 연결
+                    } else if (NETWORK_ERROR.containsMatchIn(error.orEmpty())) {
+                        // 인터넷이 끊긴 경우는 실패로 세지 않고 돌아올 때까지 기다림
+                        netWaiting = true
+                        main.postDelayed({ connectLive() }, 2000)
                     } else {
                         liveFailures++
                         // 서버가 설정·모델을 거절한 경우에만 다른 조합으로 넘어감.
@@ -985,7 +1032,7 @@ class ConversationActivity : AppCompatActivity() {
                             if (rejected) liveVariant = (liveVariant + 1) % liveVariants.size
                             main.postDelayed({ connectLive() }, if (rejected) 500L else 1500L)
                         } else {
-                            stop("실시간 방식에 연결하지 못했어요. '문장 단위' 방식을 써 보세요.\n사유: ${error?.take(160)}")
+                            stop("실시간 통역에 연결하지 못했어요. API 키와 사용량 한도를 확인해 주세요.\n사유: ${error?.take(160)}")
                         }
                     }
                     if (running) updateStatus()
@@ -996,6 +1043,9 @@ class ConversationActivity : AppCompatActivity() {
             noInterruption = variant.vad,
             voiceName = voice.ifBlank { null },
             affectiveDialog = variant.affective,
+            hintLanguages = if (variant.hints && left.lang.code != AUTO && right.lang.code != AUTO) {
+                listOf(left.lang.code, right.lang.code)
+            } else emptyList(),
         )
         speechBuffer = LiveSpeechBuffer()
         live = client
@@ -1009,12 +1059,16 @@ class ConversationActivity : AppCompatActivity() {
         val now = SystemClock.elapsedRealtime()
         if (!liveTurnOpen) {
             liveTurnOpen = true
+            turnOpenedAt = now
             speechBuffer.beginTurn(now)
             main.postDelayed(earTimeout, 1200)
         }
         lastLiveOutputAt = now
         main.removeCallbacks(turnIdle)
-        main.postDelayed(turnIdle, 4000)
+        // 소리는 재생보다 빨리 도착하고, 서버의 종료 신호는 재생이 끝날 즈음에 올 수 있음
+        // → 받은 소리가 다 재생될 시각 + 2초까지는 기다림 (최소 4초)
+        val playbackLeft = turnOpenedAt + turnAudioMs - now
+        main.postDelayed(turnIdle, maxOf(4000L, playbackLeft + 2000L))
     }
 
     /** 번역문의 글자 종류로 어느 사람의 언어인지 보고 그 사람 귀에 틂 */
@@ -1022,17 +1076,36 @@ class ConversationActivity : AppCompatActivity() {
      * force: 기다릴 만큼 기다렸으니 지금 있는 글자로 정함 (1.2초 타이머 또는 말이 끝남)
      * final: 말이 끝남. 더 올 글자가 없음
      */
-    private fun chooseEar(force: Boolean, final: Boolean = false) {
+    private fun chooseEar(force: Boolean, final: Boolean = false, allowSuspicious: Boolean = false) {
         if (ear == Ear.NONE) return
         val text = liveOut.toString()
-        // 번역이 아닌 표시 문구면 버림. 오는 중일 수 있으면 조금 더 기다림
-        // ("Music" 다음에 " is my life." 가 이어질 수 있으므로, 끝까지 기다렸다가 판단)
+        // 번역이 아닌 표시 문구일 수 있으면 말이 끝날 때까지 판단을 미룸
+        // ("Music" 다음에 " is my life." 가 이어질 수 있으므로). 버릴지는 endLiveTurn 이 정함
         val suspicious = isPlaceholder(text) || mightBecomePlaceholder(text)
-        if (suspicious) return // timeout may choose an ear, but may never discard a partial sentence
+        if (suspicious && !allowSuspicious) return
 
         val script = detectScript(text)
+        val letters = text.count { it.isLetter() }
+        val inText = liveIn.toString()
+        val inScript = detectScript(inText)
+
+        // 통역 대신 같은 언어로 대답하거나 따라 말한 경우: 들은 말과 나온 말이 같은 글자(한글·가나·키릴·태국)
+        // → 소리를 내보내지 않고, 말이 끝나면 문장 단위 방식으로 다시 통역
+        if (left.script != right.script && script != null && script == inScript &&
+            script in setOf("ko", "ja", "cyr", "thai") &&
+            letters >= 4 && inText.count { it.isLetter() } >= 4 && rescue != null &&
+            // 들은 말에 알파벳이 섞여 있으면(앞 사람 말이 섞였을 수 있음) 단정하지 않음
+            inText.count { it in 'a'..'z' || it in 'A'..'Z' } < 4
+        ) {
+            main.removeCallbacks(earTimeout)
+            heldAudio.clear()
+            heldAudioBytes = 0
+            ear = Ear.NONE
+            return
+        }
+
         // 소리만 먼저 오고 글자가 아직 하나도 없으면 양쪽 귀에 틀지 말고 조금 더 기다림 (최대 3초)
-        if (script == null && force && !final && earWaits < 3) {
+        if (letters == 0 && force && !final && earWaits < 3) {
             earWaits++
             main.removeCallbacks(earTimeout)
             main.postDelayed(earTimeout, 600)
@@ -1041,12 +1114,18 @@ class ConversationActivity : AppCompatActivity() {
         // 한글·일본어 번역이 "Starbucks" 같은 알파벳 단어로 시작할 수 있음.
         // 알파벳만 보일 때는 15자 넘게 이어지거나 기다림이 끝난 뒤에야 알파벳 언어로 판단
         val pair = setOf(left.script, right.script)
-        if (script == "latin" && !force && pair.size == 2 && "latin" in pair &&
-            text.count { it.isLetter() } < 15
-        ) return
+        if (script == "latin" && !force && pair.size == 2 && "latin" in pair && letters < 15) {
+            // 바로 정해도 되는 경우: 들은 말이 상대 글자(한글 등)였거나, 알파벳 문장이 이미 끝맺음 부호로 끝남
+            val heardOtherScript = inScript != null && inScript != "latin" && inScript in pair
+            val sentenceDone = letters >= 2 && text.trimEnd().lastOrNull() in setOf('.', '?', '!')
+            if (!heardOtherScript && !sentenceDone) return
+        }
         // 첫 조각의 이름·상표(알파벳) 한두 글자에 속지 않도록, 글자가 4자 이상 모이면 판단.
         // 다만 "네", "Yes" 처럼 짧게 끝난 말은 마지막 판단(force) 때 있는 글자로 정함
-        val enough = force || text.count { it.isLetter() } >= 4
+        val enough = force || letters >= 4
+        // 서버가 언어를 알려 줬으면, 글자로 구분할 수 없을 때 그것으로 귀를 정함
+        val byLanguage: Ear? = sideOfLanguage(turnOutLang)?.let { if (it.isLeft) Ear.LEFT else Ear.RIGHT }
+            ?: sideOfLanguage(turnInLang)?.let { if (it.isLeft) Ear.RIGHT else Ear.LEFT }
         val autoSide = listOf(left, right).firstOrNull { it.lang.code == AUTO }
         val scripts = setOf(left.script, right.script)
         val chosen = when {
@@ -1055,9 +1134,11 @@ class ConversationActivity : AppCompatActivity() {
                 val known = other(autoSide)
                 when {
                     known.script == "latin" -> Ear.BOTH // 알파벳 언어는 다른 알파벳 언어와 글자로 구분 불가
+                    // 다루지 않는 글자(아랍어·힌디어 등)는 정해진 언어가 아니므로 자동 감지 쪽 귀에
+                    script == null && letters >= 4 -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
                     script == null -> if (force) Ear.BOTH else return
                     !enough -> return
-                    script == known.script -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
+                    matches(script, known) -> if (known.isLeft) Ear.LEFT else Ear.RIGHT
                     else -> if (autoSide.isLeft) Ear.LEFT else Ear.RIGHT
                 }
             }
@@ -1065,18 +1146,42 @@ class ConversationActivity : AppCompatActivity() {
             script == null -> if (force) Ear.BOTH else return
             !enough -> return
             // 일본어↔중국어: 한자만으로는 어느 쪽인지 알 수 없음 → 가나가 나올 때까지 기다리고, 끝내 없으면 양쪽
-            scripts == setOf("ja", "han") && script == "han" -> if (force) Ear.BOTH else return
+            scripts == setOf("ja", "han") && script == "han" -> when {
+                !force -> return
+                // 가나가 하나도 없는 긴 문장은 중국어로 봄. 짧은 한자어("了解")는 양쪽에
+                text.count { it in '一'..'鿿' } >= 6 -> if (left.script == "han") Ear.LEFT else Ear.RIGHT
+                else -> Ear.BOTH
+            }
             matches(script, left) -> Ear.LEFT
             matches(script, right) -> Ear.RIGHT
             force -> Ear.BOTH
             else -> return
         }
         main.removeCallbacks(earTimeout)
-        ear = chosen
-        heldAudio.forEach { play(it, chosen) }
+        val decided = if (chosen == Ear.BOTH && byLanguage != null) byLanguage else chosen
+        ear = decided
+        heldAudio.forEach { play(it, decided) }
         heldAudio.clear()
         heldAudioBytes = 0
         renderLiveBubble()
+    }
+
+    /** 서버가 알려 준 언어 코드가 두 사람 중 누구의 언어인지 (둘 다거나 어느 쪽도 아니면 null) */
+    private fun sideOfLanguage(code: String?): Side? {
+        if (code.isNullOrBlank()) return null
+        fun base(c: String) = when (val b = c.lowercase().substringBefore('-').substringBefore('_')) {
+            "tl" -> "fil"
+            "cmn", "yue" -> "zh"
+            else -> b
+        }
+        val b = base(code)
+        val l = left.lang.code != AUTO && base(left.lang.code) == b
+        val r = right.lang.code != AUTO && base(right.lang.code) == b
+        return when {
+            l && !r -> left
+            r && !l -> right
+            else -> null
+        }
     }
 
     private fun matches(script: String, side: Side) =
@@ -1178,6 +1283,10 @@ class ConversationActivity : AppCompatActivity() {
 
         // Ambiguous, unfinished, or oversized recordings are never used for corrections.
         if (pcm == null) return
+        // 아주 짧은 말은 검산하지 않고, 요청 사이에 3초 간격을 둠 (무료 사용량 한도 보호)
+        val nowMs = SystemClock.elapsedRealtime()
+        if (liveOut.count { it.isLetter() } < 6 || nowMs - lastCheckAt < 3000) return
+        lastCheckAt = nowMs
         val worker = transcriber ?: return
         val target = views.first
         val translatedView = views.second
@@ -1221,9 +1330,13 @@ class ConversationActivity : AppCompatActivity() {
             speechBuffer.cancelTurn()
             null
         }
-        if (LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)) {
-            dropTurn(pcm)
-        } else if (ear == null && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) chooseEar(force = true, final = true)
+        val placeholder = LiveOutputPolicy.shouldDrop(liveOut.toString(), confirmed)
+        if (ear == null && !placeholder && (heldAudio.isNotEmpty() || liveOut.isNotEmpty())) {
+            // 확인되지 않은 종료(연결 끊김 등)에서는 표시 문구처럼 보여도 버리지 않고 들려줌
+            chooseEar(force = true, final = true, allowSuspicious = !confirmed)
+        }
+        // 표시 문구였거나, 통역 대신 같은 언어로 대답한 경우(Ear.NONE) → 버리고 문장 단위 방식으로 다시 통역
+        if (placeholder || ear == Ear.NONE) dropTurn(pcm)
         if (liveOut.isNotEmpty()) {
             val before = contextPrompt() // 검산에는 이번 말이 들어가기 전의 맥락만 줌
             val turn = rememberTurn()
@@ -1253,6 +1366,9 @@ class ConversationActivity : AppCompatActivity() {
         liveTurnOpen = false
         heldAudioBytes = 0
         earWaits = 0
+        turnInLang = null
+        turnOutLang = null
+        turnAudioMs = 0L
         turnSeq++
         lastLiveOutputAt = 0L
     }
@@ -1363,7 +1479,8 @@ class ConversationActivity : AppCompatActivity() {
             return
         }
         val t = track ?: return
-        val out = stereo(mono, toLeft = e != Ear.RIGHT, toRight = e != Ear.LEFT)
+        // 이어폰이 없으면 좌우를 나눌 의미가 없으므로 양쪽 스피커로
+        val out = stereo(mono, toLeft = !headphones || e != Ear.RIGHT, toRight = !headphones || e != Ear.LEFT)
         val gen = playGen
         runCatching { player?.execute { if (gen == playGen) runCatching { t.write(out, 0, out.size) } } }
     }
@@ -1475,9 +1592,18 @@ class ConversationActivity : AppCompatActivity() {
         }
         headphones = headphonesConnected()
         chipWarn.visibility = if (headphones) View.GONE else View.VISIBLE
+        (chipWarn as? TextView)?.text = if (speakerMode) {
+            "이어폰이 연결되지 않았어요. 이어폰을 연결해 양쪽 모두 끼세요"
+        } else {
+            "이어폰이 연결되지 않았어요. 연결하고 한쪽씩 나눠 끼세요"
+        }
         if (running) {
             if (fastMode) {
-                status.text = if (liveReady) "두 사람의 말을 듣고 있어요" else "연결하고 있어요…"
+                status.text = when {
+                    liveReady -> "두 사람의 말을 듣고 있어요"
+                    netWaiting -> "인터넷 연결을 기다리고 있어요…"
+                    else -> "연결하고 있어요…"
+                }
             } else {
                 refreshSteadyStatus()
             }
@@ -1517,6 +1643,12 @@ class ConversationActivity : AppCompatActivity() {
     companion object {
         private const val AUTO = "auto"
         /** 서버가 설정값이나 모델을 받아들이지 않았다는 오류 */
+        /** 인터넷이 끊겼을 때의 오류 문구 */
+        private val NETWORK_ERROR = Regex(
+            "unable to resolve host|unknownhost|failed to connect|timeout|timed out|network is unreachable|" +
+                "connection abort|connection reset|broken pipe|no route to host|socket closed",
+            RegexOption.IGNORE_CASE
+        )
         private val CONFIG_ERROR = Regex(
             "1007|invalid|unknown name|cannot find field|not found|not supported|unsupported|unimplemented",
             RegexOption.IGNORE_CASE

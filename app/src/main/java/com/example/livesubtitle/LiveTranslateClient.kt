@@ -44,6 +44,8 @@ class LiveTranslateClient(
     private val voiceName: String? = null,
     /** 말하는 사람의 감정·어조에 맞춰 말하기 (지원하는 모델에서만) */
     private val affectiveDialog: Boolean = false,
+    /** 받아쓰기에 알려 줄 언어 코드 (대화의 두 언어) */
+    private val hintLanguages: List<String> = emptyList(),
 ) {
     interface Listener {
         fun onReady()
@@ -56,6 +58,8 @@ class LiveTranslateClient(
         fun onAudio(pcm: ByteArray) {}
         /** 방금 들은 말의 언어 코드 (서버가 알려 줄 때만) */
         fun onInputLanguage(code: String) {}
+        /** 서버가 알려 준 번역문의 언어 (알려 주지 않는 모델도 있음) */
+        fun onOutputLanguage(code: String) {}
         /** 모델이 하던 말을 중간에 끊음 → 재생 중인 소리를 비워야 함 */
         fun onInterrupted() {}
     }
@@ -106,7 +110,7 @@ class LiveTranslateClient(
     private fun setupMessage(): String =
         buildSetup(
             translationInGenerationConfig, targetLanguage, echoTarget, model, systemInstruction, noInterruption,
-            voiceName, affectiveDialog
+            voiceName, affectiveDialog, hintLanguages
         ).toString()
 
     private fun handle(text: String) {
@@ -137,10 +141,13 @@ class LiveTranslateClient(
                 }
             }
         }
-        content.optJSONObject("outputTranscription")?.optString("text")?.let {
-            if (it.isNotEmpty()) {
-                gotOutput = true
-                listener.onOutputText(it)
+        content.optJSONObject("outputTranscription")?.let { t ->
+            t.optString("languageCode").let { if (it.isNotEmpty()) listener.onOutputLanguage(it) }
+            t.optString("text").let {
+                if (it.isNotEmpty()) {
+                    gotOutput = true
+                    listener.onOutputText(it)
+                }
             }
         }
         // generationComplete(생성만 끝남)는 끝이 아님. 뒤늦게 오는 원문 받아쓰기가 있으므로 turnComplete 만 끝으로 봄
@@ -184,6 +191,7 @@ class LiveTranslateClient(
             noInterruption: Boolean = false,
             voiceName: String? = null,
             affectiveDialog: Boolean = false,
+            hintLanguages: List<String> = emptyList(),
         ): JSONObject {
             val translation = JSONObject()
                 .put("targetLanguageCode", targetLanguage)
@@ -202,7 +210,13 @@ class LiveTranslateClient(
             if (affectiveDialog) generationConfig.put("enableAffectiveDialog", true)
             val setup = JSONObject()
                 .put("model", "models/$model")
-                .put("inputAudioTranscription", JSONObject())
+                // 받아쓰기에 "이 두 언어 중 하나"라고 알려 줌 → 엉뚱한 제3의 언어로 받아쓰는 일을 줄임
+                .put(
+                    "inputAudioTranscription",
+                    JSONObject().apply {
+                        if (hintLanguages.isNotEmpty()) put("languageCodes", org.json.JSONArray(hintLanguages))
+                    }
+                )
                 .put("outputAudioTranscription", JSONObject())
             if (noInterruption) {
                 setup.put(
@@ -213,8 +227,9 @@ class LiveTranslateClient(
                             "automaticActivityDetection",
                             JSONObject()
                                 .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH") // 작은 목소리도 말의 시작으로
-                                .put("prefixPaddingMs", 300) // 말의 첫머리가 잘리지 않게 앞부분을 넉넉히
-                                // 0.65초 조용하면 말이 끝난 것으로. 더 짧으면 말을 고르며 천천히 하는 사람의 문장이 중간에 끊김
+                                // 말소리가 이만큼 이어져야 "말 시작"으로 인정. 길면 "네", "Yes" 같은 짧은 말을 놓침 (공식 예시는 20)
+                                .put("prefixPaddingMs", 40)
+                                // 0.8초 조용하면 말이 끝난 것으로. 더 짧으면 말을 고르며 천천히 하는 사람의 문장이 중간에 끊김
                                 .put("silenceDurationMs", 800) // 숨 고르는 사이에 문장이 잘려 엉뚱하게 번역되지 않게
                         )
                 )

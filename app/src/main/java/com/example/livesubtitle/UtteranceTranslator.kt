@@ -497,7 +497,8 @@ object Scripts {
             .maxByOrNull { it.second }!!
         val otherCount = ko + kana + han + cyr + thai
         return when {
-            otherCount >= 2 || (otherCount == 1 && latin <= 3) -> other.first
+            // 단, 알파벳 문장 속의 이름 한두 글자("I'm at 강남 station")는 알파벳 언어로 둠
+            (otherCount >= 2 && otherCount * 4 >= latin) || (otherCount == 1 && latin <= 3) -> other.first
             latin > 0 -> "latin"
             else -> null
         }

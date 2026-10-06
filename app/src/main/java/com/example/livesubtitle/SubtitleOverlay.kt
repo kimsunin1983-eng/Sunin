@@ -88,7 +88,8 @@ class SubtitleOverlay(
 
     /** 지난 문장들 (위가 더 오래된 것). 오래된 줄일수록 조금 흐리게 */
     private val previous = List(previousCount.coerceIn(1, 4)) { line().apply { visibility = View.GONE } }
-    private val current = line()
+    /** 지금 문장은 길 수 있어 3줄까지 (지난 문장은 2줄) */
+    private val current = line().apply { maxLines = 3 }
 
     private val original = TextView(context).apply {
         setTextColor(dim)

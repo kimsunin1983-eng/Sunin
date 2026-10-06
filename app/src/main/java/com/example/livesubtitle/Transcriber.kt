@@ -164,7 +164,7 @@ class Transcriber(private val apiKey: String) {
         return try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 5000
-            conn.readTimeout = 8000
+            conn.readTimeout = 12000 // 검산은 화면 뒤에서 도는 일이라 조금 느려도 됨
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("x-goog-api-key", apiKey)

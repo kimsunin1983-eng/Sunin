@@ -79,8 +79,12 @@ class MainActivity : AppCompatActivity() {
                     startCaption()
                 } else {
                     toast("소리를 듣기 위해 '마이크' 권한이 필요해요.")
-                    // 여러 번 거절하면 허용 창이 더 뜨지 않음 → 앱 설정 화면으로 안내
-                    if (!shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) openAppSettings()
+                    // 여러 번 거절하면 허용 창이 더 뜨지 않음 → 앱 설정 화면으로 안내.
+                    // (창을 그냥 닫은 첫 번째 경우에는 열지 않도록 거절 횟수를 셈)
+                    val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+                    val denied = prefs.getInt("micDenied", 0) + 1
+                    prefs.edit().putInt("micDenied", denied).apply()
+                    if (denied >= 2 && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) openAppSettings()
                 }
             }
         }

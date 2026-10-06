@@ -17,6 +17,7 @@ internal class LiveSpeechBuffer {
         var usable = true
         /** 앞 말의 번역이 나오는 도중에 시작된 소리인지 */
         var duringTurn = false
+        var endedAt = 0L
     }
     private val preRoll = ArrayDeque<ByteArray>()
     private var preRollBytes = 0
@@ -64,6 +65,7 @@ internal class LiveSpeechBuffer {
         if (clip.duringTurn && turnOpen && clip.speechBytes >= NOISE_BYTES) ambiguous = true
         if (clip.silentBytes >= END_SILENCE_BYTES) {
             clip.complete = true
+            clip.endedAt = now
             if (!clip.claimed && clip.speechBytes >= NOISE_BYTES) { // 짧은 잡음은 발화로 세지 않음
                 waiting.addLast(clip)
                 if (waiting.size > 3) {
@@ -74,6 +76,18 @@ internal class LiveSpeechBuffer {
             }
             active = null
         }
+    }
+
+    /**
+     * 말이 끝난 지 waitMs 가 지나도록 번역이 시작되지 않은 발화(모델이 놓친 말)를 꺼냄.
+     * 꺼낸 발화는 대기열에서 빠지므로 다음 말의 검산을 방해하지 않음. 너무 짧거나 잘린 소리는 버림(null).
+     */
+    @Synchronized fun pollUnanswered(now: Long, waitMs: Long): ByteArray? {
+        if (turnOpen) return null
+        val clip = waiting.firstOrNull() ?: return null
+        if (now - clip.endedAt < waitMs) return null
+        waiting.removeFirst()
+        return if (clip.usable && clip.speechBytes >= RESCUE_SPEECH_BYTES) clip.pcm.toByteArray() else null
     }
 
     @Synchronized fun beginTurn(now: Long) {
@@ -120,6 +134,7 @@ internal class LiveSpeechBuffer {
         private const val END_SILENCE_BYTES = 32000 * 8 / 10
         private const val MIN_SPEECH_BYTES = 32000 / 10
         private const val NOISE_BYTES = 32000 * 3 / 10
+        private const val RESCUE_SPEECH_BYTES = 32000 * 6 / 10
         private const val MAX_BYTES = 32000 * 30
         private const val MAX_AGE_MS = 30_000L
     }
